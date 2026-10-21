@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ComponentRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Animated,
@@ -6,6 +6,7 @@ import {
   Platform,
   Pressable,
   ScrollView,
+  Share,
   StyleSheet,
   Text,
   TextInput,
@@ -97,7 +98,7 @@ export function ChatPanel({ runtime, palette: p, insets, collapsed, onExpand, on
   const [code, setCode] = useState('');
   const [showPerf, setShowPerf] = useState(false);
   const [kb, setKb] = useState(0);
-  const scrollRef = useRef<ComponentRef<typeof ScrollView>>(null);
+  const scrollRef = useRef<{ scrollToEnd: (o?: { animated?: boolean }) => void } | null>(null);
   const slide = useRef(new Animated.Value(0)).current;
 
   useEffect(() => {
@@ -174,19 +175,19 @@ export function ChatPanel({ runtime, palette: p, insets, collapsed, onExpand, on
       {showPerf ? <PerfPanel runtime={runtime} p={p} /> : null}
 
       <ScrollView
-        ref={scrollRef}
+        ref={scrollRef as never}
         style={styles.messages}
         contentContainerStyle={styles.messagesContent}
         keyboardShouldPersistTaps="handled"
-        onContentSizeChange={() => scrollRef.current?.scrollToEnd({ animated: true })}
+        onContentSizeChange={() => {
+          if (state.messages.length) scrollRef.current?.scrollToEnd({ animated: true });
+        }}
       >
         {state.messages.length === 0 ? (
           <View style={styles.empty}>
             <Text style={[styles.emptyTitle, { color: p.text }]}>Ask about this screen, or tell the agent what to do.</Text>
-            {state.server?.agent.available === false ? (
-              <Text style={[styles.errorText, { color: p.warn }]}>Agent unavailable: {state.server.agent.reason}</Text>
-            ) : null}
-            <View style={styles.chips}>
+            {state.server?.agent.available === false ? <ConnectClaude p={p} serverUrl={state.serverUrl} /> : null}
+            <View style={[styles.chips, state.server?.agent.available === false ? styles.hidden : null]}>
               {SUGGESTIONS.map((s) => (
                 <Pressable key={s} onPress={() => runtime.sendChat(s)} disabled={state.connection !== 'connected'} style={[styles.chip, { borderColor: p.border }]}>
                   <Text style={[styles.chipText, { color: p.text }]}>{s}</Text>
@@ -241,7 +242,14 @@ export function ChatPanel({ runtime, palette: p, insets, collapsed, onExpand, on
           <TextInput
             value={draft}
             onChangeText={setDraft}
-            placeholder={state.connection === 'connected' ? 'Message the agent…' : 'Waiting for the devtools server…'}
+            placeholder={
+              state.connection !== 'connected'
+                ? 'Waiting for the devtools server…'
+                : state.server?.agent.available === false
+                  ? 'In-app agent not configured (see above)'
+                  : 'Message the agent…'
+            }
+            editable={state.server?.agent.available !== false}
             placeholderTextColor={p.muted}
             multiline
             style={[styles.input, { color: p.text, backgroundColor: p.surface }]}
@@ -262,6 +270,34 @@ export function ChatPanel({ runtime, palette: p, insets, collapsed, onExpand, on
         </View>
       )}
     </Animated.View>
+  );
+}
+
+/**
+ * Shown when the server has no model credentials. There is no supported way for
+ * a third-party tool to offer claude.ai login, so explain the two supported paths.
+ */
+function ConnectClaude({ p, serverUrl }: { p: Palette; serverUrl: string }) {
+  const port = /:(\d+)/.exec(serverUrl.replace(/^ws:\/\//, ''))?.[1] ?? '8765';
+  const command = `claude mcp add --transport http rn-agent http://127.0.0.1:${port}/mcp`;
+  return (
+    <View style={[styles.connect, { borderColor: p.border, backgroundColor: p.surface }]}>
+      <Text style={[styles.connectTitle, { color: p.text }]}>Connect Claude</Text>
+      <Text style={[styles.connectStep, { color: p.text }]}>
+        <Text style={styles.bold}>Use your Claude Code login: </Text>
+        run this once on your computer, then ask Claude Code (in the terminal) to inspect or drive this app.
+      </Text>
+      <Text selectable style={[styles.command, { color: p.text, backgroundColor: p.code, borderColor: p.border }]}>
+        {command}
+      </Text>
+      <Pressable accessibilityRole="button" onPress={() => Share.share({ message: command })} style={[styles.shareBtn, { borderColor: p.border }]}>
+        <Text style={[styles.chipText, { color: p.text }]}>Share / copy command</Text>
+      </Pressable>
+      <Text style={[styles.connectStep, { color: p.text }]}>
+        <Text style={styles.bold}>Chat right here: </Text>
+        start the server with an Anthropic API key in its environment (ANTHROPIC_API_KEY, or Bedrock/Vertex credentials). Ask your workspace admin for a key. The key stays on your computer and is never sent to the app.
+      </Text>
+    </View>
   );
 }
 
@@ -372,6 +408,13 @@ const styles = StyleSheet.create({
   compactMain: { flex: 1, flexDirection: 'row', alignItems: 'center', gap: 10 },
   compactText: { flex: 1, fontSize: 13.5 },
   stopSmall: { width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center' },
+  bold: { fontWeight: '700' },
+  hidden: { display: 'none' },
+  connect: { borderWidth: StyleSheet.hairlineWidth, borderRadius: 12, padding: 12, gap: 8 },
+  connectTitle: { fontSize: 15, fontWeight: '700' },
+  connectStep: { fontSize: 13.5, lineHeight: 19 },
+  command: { fontFamily: Platform.select({ ios: 'Menlo', default: 'monospace' }), fontSize: 11.5, padding: 8, borderRadius: 8, borderWidth: StyleSheet.hairlineWidth },
+  shareBtn: { alignSelf: 'flex-start', borderWidth: StyleSheet.hairlineWidth, borderRadius: 14, paddingHorizontal: 12, paddingVertical: 6 },
   perf: { marginHorizontal: 12, marginTop: 8, borderWidth: StyleSheet.hairlineWidth, borderRadius: 10, padding: 10, gap: 3 },
   perfText: { fontSize: 11.5 },
 });

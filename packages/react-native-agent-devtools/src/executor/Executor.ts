@@ -207,11 +207,28 @@ export class Executor {
     return { snap, settled };
   }
 
+  async lightSettle(signal?: AbortSignal): Promise<{ snap: Snapshot; settled: boolean }> {
+    const t0 = clock();
+    const settled = await this.d.commits.waitForQuiet(50, 400, signal);
+    const snap = await this.snapshot();
+    this.record('settle-light', clock() - t0);
+    return { snap, settled };
+  }
+
   /** Common wrapper: timing, settle, change report, structured errors. Never throws. */
   private async act(
     action: string,
     signal: AbortSignal | undefined,
-    body: (snap: Snapshot) => Promise<{ el?: InternalElement; mode?: InteractionMode; warnings?: string[]; detail?: Record<string, unknown>; reResolved?: boolean; skipSettle?: boolean }>,
+    body: (snap: Snapshot) => Promise<{
+      el?: InternalElement;
+      mode?: InteractionMode;
+      warnings?: string[];
+      detail?: Record<string, unknown>;
+      reResolved?: boolean;
+      skipSettle?: boolean;
+      /** Typing rarely navigates: only wait for React to go quiet, not for animations. */
+      lightSettle?: boolean;
+    }>,
   ): Promise<ActionResult> {
     const t0 = clock();
     const startedTs = Date.now();
@@ -232,7 +249,7 @@ export class Executor {
       };
       const detail: Record<string, unknown> = { ...(r.detail ?? {}) };
       if (!r.skipSettle) {
-        const { snap: after, settled } = await this.settle(startedTs, signal);
+        const { snap: after, settled } = r.lightSettle ? await this.lightSettle(signal) : await this.settle(startedTs, signal);
         const { errors, failed, ...changes } = this.changes(before, after, logId, netId);
         result.settled = settled;
         result.changes = changes;
@@ -345,7 +362,10 @@ export class Executor {
       } catch (e) {
         const msg = e instanceof Error ? `${e.name}: ${e.message}` : String(e);
         this.d.logs.addError(e, 'action');
-        throw new ToolFailure('THREW', `The press handler threw: ${msg}. On a real device this would surface as an uncaught JS error.`);
+        throw new ToolFailure('THREW', `The press handler threw: ${msg}. On a real device this would surface as an uncaught JS error.`, {
+          target: this.targetInfo(el),
+          mode: 'semantic',
+        });
       }
     };
     if (el.role === 'switch' && typeof el.pressHandler === 'function') {
@@ -430,7 +450,7 @@ export class Executor {
         mode = 'semantic';
         warnings.push('native module unavailable: called onChangeText directly');
       }
-      return { el, mode, warnings, detail, reResolved: m.reResolved };
+      return { el, mode, warnings, detail, reResolved: m.reResolved, lightSettle: opts.submit !== true };
     });
   }
 

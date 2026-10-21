@@ -147,9 +147,9 @@ function collectText(f: Fiber, out: string[], depth = 0): void {
   }
 }
 
-const cleanText = (parts: string[]): string =>
+const cleanText = (parts: string[], sep = ''): string =>
   parts
-    .join('')
+    .join(sep)
     .replace(/[-]/g, '') // icon-font glyphs (private use area)
     .replace(/\s+/g, ' ')
     .trim();
@@ -214,6 +214,15 @@ export class Inspector {
     const stats = { fibers: 0, hostNodes: 0 };
     let lastStaticText: InternalText | undefined;
     const usedFingerprints = new Set<string>();
+
+    /** A static text directly above, or on the same row to the left, labels a field/switch. */
+    const nearbyLabel = (rect: Rect | undefined): string | undefined => {
+      const lb = lastStaticText?.bounds;
+      if (!lb || !rect || !lastStaticText) return undefined;
+      const above = rect.y - (lb.y + lb.height) < 40 && rect.y >= lb.y && Math.abs(lb.x - rect.x) < 60;
+      const sameRow = Math.abs(lb.y + lb.height / 2 - (rect.y + rect.height / 2)) < 24 && lb.x + lb.width <= rect.x + 4;
+      return above || sameRow ? lastStaticText.text : undefined;
+    };
 
     const fingerprintFor = (hash: number): string => {
       let fp = hash.toString(36);
@@ -392,11 +401,7 @@ export class Inspector {
         const secure = props.secureTextEntry === true;
         const raw = props.text ?? props.value ?? ownerProp(owners, 'value') ?? ownerProp(owners, 'defaultValue');
         const editable = props.editable !== false && ownerProp(owners, 'editable') !== false;
-        let label = a11yLabel;
-        if (!label && lastStaticText?.bounds && rect) {
-          const lb = lastStaticText.bounds;
-          if (rect.y - (lb.y + lb.height) < 40 && rect.y >= lb.y && Math.abs(lb.x - rect.x) < 60) label = lastStaticText.text;
-        }
+        const label = a11yLabel ?? nearbyLabel(rect);
         addElement(f, next, hash, 'textbox', rect, {
           ...(label ? { label: truncate(label, 80) } : {}),
           ...(typeof props.placeholder === 'string' ? { placeholder: truncate(props.placeholder, 60) } : {}),
@@ -411,8 +416,9 @@ export class Inspector {
       // ---- Switch ------------------------------------------------------------------
       if (SWITCH_TYPES.has(type) || SLIDER_TYPES.has(type)) {
         const rect = this.deps.measure(f);
+        const switchLabel = a11yLabel ?? nearbyLabel(rect);
         addElement(f, next, hash, SWITCH_TYPES.has(type) ? 'switch' : 'slider', rect, {
-          ...(a11yLabel ? { label: a11yLabel } : {}),
+          ...(switchLabel ? { label: switchLabel } : {}),
           value: SWITCH_TYPES.has(type) ? props.value === true : props.value,
           enabled: props.disabled !== true && props.enabled !== false && !state.disabled,
           actions: ['tap'],
@@ -551,7 +557,7 @@ export class Inspector {
 
     // ---- Labels, refs and texts ----
     for (const el of elements) {
-      const text = cleanText(el.textParts);
+      const text = cleanText(el.textParts, ' ');
       if (text && el.role !== 'textbox') el.text = truncate(text, 120);
       if (!el.label) {
         el.label =
@@ -645,8 +651,15 @@ export class Inspector {
     if (hitTag === el.tag) return null;
     if (overlayTags.has(hitTag)) return 'the devtools overlay';
     if (hitTag === 0) return 'a non-React view or another window (keyboard, dialog, system UI)';
-    const hitFiber = hostByTag.get(hitTag);
+    const hitFiber = hostByTag.get(hitTag) ?? this.findHostOutsideApp(hitTag);
     if (!hitFiber) return `view #${hitTag} outside the inspected app tree`;
+    if (!hostByTag.has(hitTag)) {
+      for (let f: Fiber | null = hitFiber; f; f = f.return) {
+        const n = componentName(f.type) ?? '';
+        if (n.startsWith('LogBox')) return 'a LogBox dev notification (warning/error toast); dismiss it in the app first';
+      }
+      return `${describeFiber(hitFiber)} (rendered outside the app tree)`;
+    }
     // Is the hit view inside the element (e.g. its label Text)?
     for (let f: Fiber | null = hitFiber; f; f = f.return) {
       if (f === el.fiber || f === el.fiber.alternate) return null;
@@ -656,6 +669,22 @@ export class Inspector {
       if (f === hitFiber || f === hitFiber.alternate) return `its container (${describeFiber(hitFiber)}); the element does not receive touches`;
     }
     return describeFiber(hitFiber);
+  }
+
+  /** Search the whole React tree (LogBox, other roots under AppContainer) for a host tag. */
+  private findHostOutsideApp(tag: number): Fiber | undefined {
+    let top = this.getRoot();
+    if (!top) return undefined;
+    while (top.return) top = top.return;
+    const stack: Fiber[] = [top.stateNode?.current ?? top];
+    let n = 0;
+    while (stack.length && n++ < 20_000) {
+      const f = stack.pop()!;
+      if (f.tag === FiberTag.HostComponent && nativeTagOf(f) === tag) return f;
+      if (f.sibling) stack.push(f.sibling);
+      if (f.child) stack.push(f.child);
+    }
+    return undefined;
   }
 
   private linkContainers(elements: InternalElement[], byFiber: Map<Fiber, InternalElement>): void {
