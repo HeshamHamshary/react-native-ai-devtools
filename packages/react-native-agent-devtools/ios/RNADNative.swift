@@ -61,7 +61,7 @@ public final class RNADNative: NSObject {
     [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: keychainService, kSecAttrAccount as String: key]
   }
 
-  @objc public static func storedValue(forKey key: String) -> String? {
+  @objc(rnadStoredValueForKey:) public static func rnadStoredValue(forKey key: String) -> String? {
     var query = keychainQuery(key)
     query[kSecReturnData as String] = true
     query[kSecMatchLimit as String] = kSecMatchLimitOne
@@ -71,7 +71,7 @@ public final class RNADNative: NSObject {
   }
 
   /// An empty value removes the entry. Stored for this device only, never synced or backed up.
-  @objc public static func setStoredValue(_ value: String, forKey key: String) -> Bool {
+  @objc(rnadSetStoredValue:forKey:) public static func rnadSetStoredValue(_ value: String, forKey key: String) -> Bool {
     SecItemDelete(keychainQuery(key) as CFDictionary)
     if value.isEmpty { return true }
     var item = keychainQuery(key)

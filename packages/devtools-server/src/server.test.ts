@@ -303,10 +303,11 @@ test('a simulator can pair voluntarily; pairings persist as hashes and can be re
     await again.opened();
     again.hello({ token });
     assert.equal((await again.next('welcome')).trusted, true, 'still paired after a server restart (e.g. app reload)');
-    again.close();
 
+    const dropped = again.closed();
     const revoked = await fetch(`http://127.0.0.1:${s2.port}/api/pairing/revoke`, { method: 'POST', headers: authed(s2.token) });
     assert.equal(revoked.status, 200);
+    assert.equal(await dropped, 4004, 'connected paired apps are disconnected so revocation applies immediately');
     const after = new FakeDevice(`ws://127.0.0.1:${s2.port}`);
     await after.opened();
     after.hello({ token });

@@ -116,6 +116,11 @@ export class DeviceSession extends EventEmitter {
     this.cancelAll();
     this.emit('close');
   }
+
+  /** Close the socket (the app reconnects and starts over, e.g. after its pairing was revoked). */
+  disconnect(code: number, reason: string): void {
+    this.ws.close(code, reason);
+  }
 }
 
 export class DeviceRegistry extends EventEmitter {

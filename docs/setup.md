@@ -30,7 +30,7 @@ import { AgentDevTools } from 'react-native-agent-devtools';
 
 Notes:
 
-- **Production safety.** When `__DEV__` is false the component renders `children` only and installs nothing. The native methods also refuse to run in non-debuggable builds (iOS `DEBUG`, Android `FLAG_DEBUGGABLE`). The `enabled` prop can only turn the tool *off*.
+- **Production safety.** In release builds the package resolves to a stub that renders `children` unchanged, and Metro leaves the runtime out of the bundle entirely (`yarn check:release-bundle` verifies this). The native methods also refuse to run in non-debuggable builds (iOS `DEBUG`, Android `FLAG_DEBUGGABLE`). The `enabled` prop can only turn the tool *off*.
 - **Navigation.** Routes are inferred automatically from React Navigation's `route` props. Passing `navigationRef` adds exact, event-driven history. Apps without React Navigation can call `reportRoute('Checkout')`.
 - **Hard cases.** For components discovery can't see (canvas drawings, custom gesture recognizers), wrap them in `<AgentTarget id label onActivate>`.
 
@@ -43,16 +43,21 @@ npx react-native-agent-devtools-server --repo .        # read-only source access
 | Flag | Effect |
 |---|---|
 | `--repo <path>` | Lets the agent Read/Grep/Glob that tree. Secret files (`.env`, keys, keystores, `google-services.json`, …) are always excluded; symlinks can't escape. Repeatable. |
-| `--allow-edits` | Additionally allows Edit/Write inside `--repo`. Each edit is approved on the device. |
+| `--allow-edits` | Additionally allows Edit/Write inside `--repo`. Each edit is approved on a paired device. |
+| `--auth <mode>` | Credentials for the in-app agent: `console`, `api-key`, `bedrock`, `vertex` or `foundry`. Without it, only a completed "Set up Claude" sign-in is used; see below. |
+| `--project-instructions` | Adds the repo's `CLAUDE.md` to the agent's instructions, as text only. |
 | `--model <id>` | Model for the in-app agent. |
 | `--lan` | Accept physical devices on your network (pairing required). |
+| `--require-pairing` | Require pairing for every device, simulators included (shared machines). |
 | `--demo-agent` | Scripted, clearly labelled replies. Use this for UI work without credentials. |
 | `--no-agent`, `--no-mcp` | Disable the in-app agent, or the MCP endpoint. |
 
-Debugging commands (these run no model):
+Debugging commands. They run no model, and they authenticate with the local token the server keeps in `~/.config/react-native-agent-devtools/server-token`:
 
 ```bash
 npx react-native-agent-devtools-server devices
+npx react-native-agent-devtools-server pair          # current pairing code and paired devices
+npx react-native-agent-devtools-server unpair        # revoke every paired device
 npx react-native-agent-devtools-server call getUI '{"bounds":true}' --device ios
 npx react-native-agent-devtools-server call runSequence '{"actions":[{"type":"tap","target":"text=Log in"}]}'
 npx react-native-agent-devtools-server bench --iterations 20 --device android
@@ -83,15 +88,21 @@ There are three supported paths. The first two put the chat in the app.
 
      Under the hood, the server runs Claude Code's documented `claude auth login --console`, using the Claude Code binary bundled with the Agent SDK. It runs in a config directory used only by the agent (`~/.config/react-native-agent-devtools/claude`), so it never touches your own Claude Code login. Approving creates an API key in your Console organization, managed by Claude Code. Usage is billed to that organization at API rates. If your organization controls who may create API keys, check with your admin first.
    - **No browser on this machine (SSH)?** Run `react-native-agent-devtools-server login` in a terminal. It prints a link and accepts the code back.
-   - **Or** start the server with `ANTHROPIC_API_KEY` (or `CLAUDE_CODE_USE_BEDROCK=1` / `CLAUDE_CODE_USE_VERTEX=1` and the cloud credentials) in its environment. The environment takes precedence over the sign-in.
+   - **Or** choose credentials explicitly when starting the server:
+     - `--auth api-key` with `ANTHROPIC_API_KEY` in the environment
+     - `--auth bedrock`, `vertex` or `foundry` with `CLAUDE_CODE_USE_*=1` and that provider's credentials
+
+     A key that merely happens to be exported in your shell is never used; the banner tells you it was ignored.
    - **Sign out:** `react-native-agent-devtools-server logout`.
 
-   Credentials never reach the app. Signing in with a Claude subscription (Pro, Max, Team or Enterprise chat plans) is not offered and is refused if found. Anthropic's Agent SDK terms don't allow products to use claude.ai login, which is the main difference from the Claude in Chrome extension. To use your subscription, take path 1 or 3. Before the first prompt, the server checks which credential source the agent would use (`accountInfo()`, no model call) and fails closed.
+   Credentials never reach the app. Signing in with a Claude subscription (Pro, Max, Team or Enterprise chat plans) is not offered and is refused if found. Anthropic's Agent SDK terms don't allow products to use claude.ai login, which is the main difference from the Claude in Chrome extension. To use your subscription, take path 1 or 3. Before the first prompt, the server checks which credential source the agent would use (`accountInfo()`, no model call). It must be exactly the one you chose, or the agent doesn't start. See [security.md](security.md#credentials-for-the-in-app-agent).
 3. **Claude Code in the terminal.** Uses your own Claude Code login; the conversation stays in the terminal.
    ```bash
-   claude mcp add --transport http rn-agent http://127.0.0.1:8765/mcp
+   claude mcp add rn-agent -- npx react-native-agent-devtools-server mcp
    ```
-   Then ask Claude Code to inspect or drive the app. It gets the same `mobile_*` tools. (Use a different name than `rn-agent` if you also use path 1 in the same project.)
+   Then ask Claude Code to inspect or drive the app. It gets the same `mobile_*` tools. The `mcp` command is a small stdio server that reads the local token itself.
+
+   Prefer HTTP? Use `claude mcp add --transport http rn-agent http://127.0.0.1:8765/mcp --header "Authorization: Bearer $(npx react-native-agent-devtools-server token)"`.
 
 ## 3. Connect a device
 
@@ -102,18 +113,24 @@ By default the app connects to the **same host it loads its JavaScript bundle fr
 | iOS simulator | Nothing | The simulator shares the Mac's loopback. |
 | Android emulator | Nothing | `10.0.2.2` maps to the host's loopback; the server accepts that host name. |
 | Android device over USB | `adb reverse tcp:8765 tcp:8765` (and `tcp:8081` for Metro) | Traffic stays on loopback; no pairing needed. |
-| Android device over Wi-Fi | Start the server with `--lan`, then enter the pairing code shown in the terminal into the app's chat panel | See LAN mode below. |
+| Android device over Wi-Fi | Start the server with `--lan`, then enter the pairing code shown in the terminal into the app's chat panel | See Pairing and LAN mode below. |
 | Physical iPhone | Start the server with `--lan`; the app uses the Metro host IP; enter the pairing code | Verified only with the protocol test suite over a LAN interface, not on a physical iPhone. |
+
+### Pairing
+
+The server prints a pairing code. In the app, tap **⚿ Pair this app** in the panel and enter it.
+
+- **Physical devices on the LAN must pair.**
+- **Simulators connect without pairing,** but only a paired app can approve code edits or Claude Code permission prompts. An unpaired app is told to answer in the terminal instead.
+- **Pairing persists.** The app stores its device token in the Keychain (iOS) or app-private storage (Android), and the server stores only a hash. Pairing survives reloads, app restarts and server restarts for 30 days.
+- **Revoking:** `unpair` revokes every pairing at once. Connected apps are disconnected and come back unpaired.
+- **Codes** are 8 characters, single-use, expire after 10 minutes, and lock out after 5 wrong attempts.
 
 ### LAN mode
 
-`--lan` binds to all interfaces and prints a warning, the device URL and a pairing code.
+`--lan` binds to all interfaces and prints a warning and the device URL. Devices must pair (see above).
 
-- The code is 8 characters, single-use, expires after 10 minutes, and locks out after 5 wrong attempts.
-- A successful pairing returns a device token valid for 12 hours. It's kept in memory, so after a full JS reload you pair again.
-- Control endpoints (`/mcp`, `/api/*`) stay **loopback-only** even in LAN mode, so another machine can't drive your app or read its data through the server.
-
-Only use LAN mode on networks you trust.
+Control endpoints (`/mcp`, `/api/*`, `/channel`) stay **loopback-only and token-authenticated** even in LAN mode, so another machine can't drive your app or read its data through the server. Traffic is plain `ws://`: only use LAN mode on networks you trust.
 
 ## Running the example app
 

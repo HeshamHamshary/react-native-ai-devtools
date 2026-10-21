@@ -249,6 +249,8 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
       }
       if (url.pathname === '/api/pairing/revoke' && req.method === 'POST') {
         pairing.revokeAll();
+        // Trust is decided at connect time: make paired apps reconnect so it takes effect now.
+        devices.list().filter((d) => d.trusted).forEach((d) => d.disconnect(4004, 'pairing revoked'));
         log(`all device pairings revoked; new pairing code: ${pairing.currentCode}`);
         return json(res, 200, { ok: true });
       }
