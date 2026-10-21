@@ -5,6 +5,7 @@ import {
   createSdkMcpServer,
   query,
   tool,
+  type AccountInfo,
   type CanUseTool,
   type HookCallback,
   type Query,
@@ -38,6 +39,59 @@ export function agentAvailability(env = process.env): { available: boolean; reas
     reason:
       'No model credentials in the server environment. Set ANTHROPIC_API_KEY (or CLAUDE_CODE_USE_BEDROCK=1 / CLAUDE_CODE_USE_VERTEX=1 with cloud credentials) and restart the server. You can still drive the app from Claude Code via the MCP endpoint.',
   };
+}
+
+const CLOUD_PROVIDERS = new Set(['bedrock', 'vertex', 'foundry', 'anthropicAws', 'anthropicGoogleCloud', 'mantle']);
+const API_KEY_SOURCES = new Set(['ANTHROPIC_API_KEY', 'apiKeyHelper']);
+
+/**
+ * The in-app agent may only run on credentials the developer configured for this
+ * server: an API key or a cloud provider. A personal claude.ai login (OAuth) is
+ * never acceptable: Anthropic's Agent SDK terms do not allow products to use it,
+ * and Claude Code can silently prefer a stored login over ANTHROPIC_API_KEY.
+ */
+export function authDecision(info: AccountInfo | undefined): { ok: boolean; source: string; reason?: string } {
+  if (!info) return { ok: false, source: 'unknown', reason: 'could not determine which credentials the agent would use' };
+  if (info.apiProvider && CLOUD_PROVIDERS.has(info.apiProvider)) return { ok: true, source: info.apiProvider };
+  if (info.apiKeySource && API_KEY_SOURCES.has(info.apiKeySource)) return { ok: true, source: info.apiKeySource };
+  const source = info.apiKeySource ?? info.tokenSource ?? 'unknown';
+  return {
+    ok: false,
+    source,
+    reason: `the agent would authenticate with "${source}"${info.subscriptionType ? ` (${info.subscriptionType} subscription login)` : ''}, not with a configured API key. The in-app chat only runs on ANTHROPIC_API_KEY or Bedrock/Vertex/Foundry credentials.`,
+  };
+}
+
+/** Isolated Claude Code config dir so the subprocess never inherits a personal login, settings or plugins. */
+let isolatedConfigDir: string | undefined;
+function agentEnv(): Record<string, string> {
+  isolatedConfigDir ??= mkdtempSync(join(tmpdir(), 'rnad-claude-config-'));
+  const env: Record<string, string> = {};
+  for (const [k, v] of Object.entries(process.env)) if (typeof v === 'string') env[k] = v;
+  env.CLAUDE_CONFIG_DIR = isolatedConfigDir;
+  return env;
+}
+
+/** Check credentials without sending any prompt (no model call). */
+export async function verifyAgentAuth(timeoutMs = 20_000): Promise<{ ok: boolean; source: string; reason?: string }> {
+  const idle = new AsyncQueue<SDKUserMessage>();
+  const q = query({ prompt: idle, options: { env: agentEnv(), tools: [], settingSources: [], persistSession: false } });
+  try {
+    const info = await Promise.race([
+      q.accountInfo(),
+      new Promise<undefined>((r) => setTimeout(() => r(undefined), timeoutMs)),
+    ]);
+    return authDecision(info);
+  } catch (e) {
+    return { ok: false, source: 'error', reason: `credential check failed: ${redactText(String((e as Error)?.message ?? e))}` };
+  } finally {
+    idle.close();
+    try {
+      q.close();
+    } catch {
+      // already closed
+    }
+  }
 }
 
 interface Turn {
@@ -76,6 +130,8 @@ export class AgentSession {
   private model?: string;
   private closed = false;
   private cancelRequested = false;
+  /** Resolves once the session's credentials have been checked (fail closed). */
+  private ready?: Promise<{ ok: boolean; reason?: string }>;
   private readonly device: DeviceSession;
   private readonly cfg: AgentConfig;
 
@@ -164,13 +220,33 @@ export class AgentSession {
         includePartialMessages: true,
         persistSession: false,
         stderr: (data: string) => this.cfg.log(`[agent stderr] ${redactText(data.trim()).slice(0, 500)}`),
+        env: agentEnv(),
       },
     });
-    void this.loop();
+    const q = this.q;
+    this.ready = Promise.race([
+      q.accountInfo().then(authDecision),
+      new Promise<{ ok: false; source: string; reason: string }>((r) =>
+        setTimeout(() => r({ ok: false, source: 'timeout', reason: 'credential check timed out' }), 20_000),
+      ),
+    ]).catch((e: unknown) => ({ ok: false, source: 'error', reason: `credential check failed: ${redactText(String(e))}` }));
+    void this.ready.then((d) => {
+      if (d.ok) {
+        this.cfg.log(`agent credentials: ${'source' in d ? d.source : 'ok'}`);
+        void this.loop();
+      } else {
+        this.cfg.log(`agent disabled: ${d.reason}`);
+        this.close();
+      }
+    });
   }
 
   async send(text: string, turnId: string): Promise<void> {
-    if (this.closed) return;
+    const auth = await this.ready;
+    if (!auth?.ok || this.closed) {
+      this.device.send({ type: 'chat.error', message: `Agent unavailable: ${auth?.reason ?? 'session closed'}`, code: 'AGENT_UNAVAILABLE' });
+      return;
+    }
     this.turn = { id: turnId, t0: performance.now(), toolMs: 0, deviceMs: 0, toolCalls: 0, tools: new Map(), streamed: false };
     this.device.send({ type: 'chat.status', state: 'thinking', turnId });
     // Attach a compact snapshot so simple questions need no tool round trip.

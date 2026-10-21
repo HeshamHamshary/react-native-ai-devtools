@@ -3,7 +3,7 @@ import { existsSync, statSync } from 'node:fs';
 import { networkInterfaces } from 'node:os';
 import { resolve } from 'node:path';
 import { parseArgs } from 'node:util';
-import { agentAvailability } from './agent/AgentSession.ts';
+import { agentAvailability, verifyAgentAuth } from './agent/AgentSession.ts';
 import { SERVER_VERSION, startServer } from './server.ts';
 
 const c = {
@@ -154,7 +154,14 @@ async function main() {
     log,
   });
 
-  const avail = values['no-agent'] ? { available: false, reason: 'disabled with --no-agent' } : agentAvailability();
+  let avail: { available: boolean; reason?: string; source?: string } = values['no-agent']
+    ? { available: false, reason: 'disabled with --no-agent' }
+    : agentAvailability();
+  if (avail.available) {
+    // Local control request only; no prompt is sent and no model is called.
+    const v = await verifyAgentAuth();
+    avail = v.ok ? { available: true, source: v.source } : { available: false, reason: v.reason };
+  }
   const out: string[] = [
     '',
     `${c.orange('✦')} ${c.bold('react-native-agent-devtools-server')} ${c.dim(`v${SERVER_VERSION}`)}`,
@@ -162,7 +169,7 @@ async function main() {
     `  ${c.bold('listening')}    ws://${values.lan ? '0.0.0.0' : '127.0.0.1'}:${server.port} ${c.dim(values.lan ? '(all interfaces)' : '(loopback only)')}`,
     `  ${c.bold('simulators')}   iOS simulator and Android emulator connect automatically via the Metro host`,
     `               ${c.dim(`USB Android: adb reverse tcp:${server.port} tcp:${server.port}`)}`,
-    `  ${c.bold('agent')}        ${avail.available ? c.green('ready') + c.dim(values.model ? ` (model ${values.model})` : '') : c.yellow(`unavailable — ${avail.reason}`)}`,
+    `  ${c.bold('agent')}        ${avail.available ? c.green('ready') + c.dim(` (credentials: ${avail.source}${values.model ? `, model ${values.model}` : ''})`) : c.yellow(`unavailable — ${avail.reason}`)}`,
     `  ${c.bold('repo access')}  ${repoRoots.length ? `read${values['allow-edits'] ? ' + approved edits' : '-only'}: ${repoRoots.join(', ')} ${c.dim('(secret files always excluded)')}` : c.dim('disabled (use --repo <path>)')}`,
     `  ${c.bold('Claude Code')}  ${values['no-mcp'] ? c.dim('MCP disabled') : `claude mcp add --transport http rn-agent http://127.0.0.1:${server.port}/mcp`}`,
   ];
