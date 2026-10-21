@@ -1,7 +1,8 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
-import { MOBILE_TOOLS, type ToolContext } from '../tools/mobileTools.ts';
+import type { ToolContext } from '../tools/mobileTools.ts';
+import { TOOLS } from '../tools/registry.ts';
 import type { DeviceRegistry } from './devices.ts';
 
 export const MCP_INSTRUCTIONS =
@@ -17,14 +18,14 @@ export const MCP_INSTRUCTIONS =
  * Stateless MCP (Streamable HTTP) endpoint so an existing Claude Code session can
  * drive the connected app:  claude mcp add --transport http rn-agent http://127.0.0.1:8765/mcp
  */
-export function createMcpHandler(devices: DeviceRegistry, version: string, os?: ToolContext['os']) {
+export function createMcpHandler(devices: DeviceRegistry, version: string, env: Pick<ToolContext, 'os' | 'flows'> = {}) {
   const build = () => {
     const server = new McpServer({ name: 'react-native-agent-devtools', version }, { instructions: MCP_INSTRUCTIONS });
-    for (const t of MOBILE_TOOLS) {
+    for (const t of TOOLS) {
       server.registerTool(
         t.name,
         { description: t.description, inputSchema: t.shape, annotations: { readOnlyHint: t.kind === 'read' } },
-        async (args: Record<string, unknown>) => (await t.run(args ?? {}, { device: devices.active(), ...(os ? { os } : {}) })) as never,
+        async (args: Record<string, unknown>) => (await t.run(args ?? {}, { device: devices.active(), ...env })) as never,
       );
     }
     return server;

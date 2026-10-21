@@ -9,6 +9,9 @@ import { claudeBinary } from './agent/account.ts';
 import { AUTH_MODES, agentEnv, stateDir } from './agent/credentials.ts';
 import { runChannelBridge } from './channel/bridge.ts';
 import { launchClaudeCode } from './channel/launch.ts';
+import { writeFileSync } from 'node:fs';
+import { toMaestro } from './flows/maestro.ts';
+import { FlowStore } from './flows/store.ts';
 import { readServerToken, rotateServerToken } from './security/serverToken.ts';
 import { SERVER_VERSION, startServer } from './server.ts';
 
@@ -37,6 +40,8 @@ Usage:
   react-native-agent-devtools-server bench [--iterations N]
                                                          Measure device-side latency (no model)
   react-native-agent-devtools-server devices             List connected apps
+  react-native-agent-devtools-server flows [list | show <name> | run <name> | export <name> --maestro [--out f]]
+                                                         Saved test flows: replay, or export to Maestro YAML
   react-native-agent-devtools-server pair                Show the current pairing code
   react-native-agent-devtools-server unpair              Revoke every paired device
   react-native-agent-devtools-server login | logout      Sign the in-app agent in/out (Anthropic Console)
@@ -120,6 +125,8 @@ async function main() {
       auth: { type: 'string' },
       'require-pairing': { type: 'boolean', default: false },
       'os-input': { type: 'boolean', default: false },
+      maestro: { type: 'boolean', default: false },
+      out: { type: 'string' },
       rotate: { type: 'boolean', default: false },
       'demo-agent': { type: 'boolean', default: false },
       iterations: { type: 'string', default: '20' },
@@ -154,6 +161,44 @@ async function main() {
     for (const c of out.content) process.stdout.write(c.type === 'text' ? `${c.text}\n` : `[${c.type}]\n`);
     process.exitCode = out.isError ? 1 : 0;
     return;
+  }
+
+  if (command === 'flows') {
+    const [sub = 'list', name] = positionals;
+    const store = new FlowStore(stateDir());
+    if (sub === 'list') {
+      const list = store.list();
+      process.stdout.write(list.length ? `${list.map((f) => `${f.app}/${f.name}  ${f.steps} steps  ${f.createdAt.slice(0, 16)}`).join('\n')}\n` : 'no saved flows\n');
+      return;
+    }
+    if (!name) throw new Error('usage: flows list | show <name> | run <name> [--device] | export <name> --maestro [--out file]');
+    if (sub === 'run') {
+      // Secret placeholders are filled from this shell's RNAD_SECRET_* variables.
+      const secrets = Object.fromEntries(Object.entries(process.env).filter((e): e is [string, string] => e[0].startsWith('RNAD_SECRET_') && typeof e[1] === 'string'));
+      const out = (await api(port, '/api/tool', { method: 'POST', body: { name: 'mobile_run_flow', args: { name, secrets }, ...(deviceSelector ? { device: deviceSelector } : {}) } })) as {
+        content: { text?: string }[];
+        isError?: boolean;
+      };
+      process.stdout.write(`${out.content.map((c) => c.text ?? '').join('\n')}\n`);
+      process.exitCode = out.isError ? 1 : 0;
+      return;
+    }
+    const found = store.load(name);
+    if (!found) throw new Error(`no flow named ${name} (see: flows list)`);
+    if (sub === 'show') {
+      process.stdout.write(`${found.file}\n${JSON.stringify(found.flow, null, 2)}\n`);
+      return;
+    }
+    if (sub === 'export') {
+      if (!values.maestro) throw new Error('export needs --maestro');
+      const yaml = toMaestro(found.flow);
+      if (values.out) {
+        writeFileSync(resolve(process.env.INIT_CWD ?? process.cwd(), values.out), yaml);
+        process.stdout.write(`wrote ${values.out}\n`);
+      } else process.stdout.write(yaml);
+      return;
+    }
+    throw new Error(`unknown flows command ${sub}`);
   }
 
   if (command === 'devices') {

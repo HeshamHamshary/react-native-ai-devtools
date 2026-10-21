@@ -1,5 +1,9 @@
 import { z } from 'zod';
-import type { ActionResult, LogEntry, NetworkEntry, RpcMethod, ScreenshotResult } from 'react-native-agent-devtools-protocol';
+import type { ActionResult, FlowStep, LogEntry, NetworkEntry, RpcMethod, ScreenshotResult, SequenceAction } from 'react-native-agent-devtools-protocol';
+import { parseTarget } from 'react-native-agent-devtools-protocol';
+import type { FlowRecorder } from '../flows/recorder.ts';
+import { FlowRecorder as Recorder, secretVar } from '../flows/recorder.ts';
+import type { FlowStore } from '../flows/store.ts';
 import type { Automation, OsInput, Point } from '../automation/osInput.ts';
 import type { DeviceSession, RpcResult } from '../transport/devices.ts';
 import { RpcError } from '../transport/devices.ts';
@@ -19,6 +23,8 @@ export interface ToolContext {
   device: DeviceSession | undefined;
   /** OS-level input (adb / Maestro). `prefer`: use it by default for taps, typing and swipes. */
   os?: { automation: Automation; prefer: boolean };
+  /** Records successful actions as flow steps, and stores saved flows. */
+  flows?: { recorder: FlowRecorder; store: FlowStore };
   signal?: AbortSignal;
   /** Called with device-side timing for per-turn performance stats. */
   onRpc?: (method: RpcMethod, r: RpcResult) => void;
@@ -85,17 +91,18 @@ export function toScreen(p: Point, frame: Frame | undefined, unit: 'px' | 'pt'):
  * and records a baseline, the OS automation backend injects the input, and the device
  * reports what changed (mode os-injected). Never falls back to another mode.
  */
-async function osAct(
+export async function osAct(
   ctx: ToolContext,
   name: string,
   target: unknown,
   perform: (input: OsInput, at: Point | undefined, screen: (p: Point) => Point) => Promise<void>,
+  onResult?: (r: ActionResult) => void,
 ): Promise<ToolOutput> {
   if (!ctx.device) throw new RpcError('NO_DEVICE', 'No app is connected. Open the app with react-native-agent-devtools enabled.');
   if (!ctx.os) return text('✗ UNSUPPORTED: OS-level input is not available on this server. No other interaction mode was used.', true);
   const { input, reason } = await ctx.os.automation.for(ctx.device.id, ctx.device.info);
   if (!input) return text(`✗ UNSUPPORTED: no OS-level input for this device: ${reason}. No other interaction mode was used.`, true);
-  const prep = await call<{ token: string; point?: Point; frame?: Frame }>(ctx, 'prepareExternal', { action: name, ...(typeof target === 'string' ? { target } : {}) });
+  const prep = await call<{ token: string; point?: Point; frame?: Frame }>(ctx, 'prepareExternal', { action: name, ...(target !== undefined ? { target } : {}) });
   const screen = (p: Point) => toScreen(p, prep.frame, input.unit);
   let ok = true;
   let error: string | undefined;
@@ -105,8 +112,17 @@ async function osAct(
     ok = false;
     error = e instanceof Error ? e.message : String(e);
   }
-  return action(await call<ActionResult>(ctx, 'finishExternal', { token: prep.token, ok, ...(error ? { error } : {}), backend: input.name }, 30_000));
+  const r = await call<ActionResult>(ctx, 'finishExternal', { token: prep.token, ok, ...(error ? { error } : {}), backend: input.name }, 30_000);
+  onResult?.(r);
+  return action(r);
 }
+
+/** Remember a successful action for "save that as a test". */
+function record(ctx: ToolContext, step: FlowStep, r: ActionResult): void {
+  if (ctx.device && ctx.flows) ctx.flows.recorder.record(ctx.device, step, r);
+}
+
+const stable = (r: ActionResult, given: unknown) => Recorder.stableTarget(r, given) ?? parseTarget(given) ?? undefined;
 
 const wantsOs = (ctx: ToolContext, mode: unknown) => mode === 'os' || (mode === undefined && ctx.os?.prefer === true);
 
@@ -188,16 +204,17 @@ export const MOBILE_TOOLS: MobileTool[] = [
     },
     summary: (a) => `${a.long ? 'Long-press' : 'Tap'} ${quote(a.target)}${a.mode === 'os' ? ' (OS)' : ''}`,
     run: (a, ctx) =>
-      guarded(async () =>
-        wantsOs(ctx, a.mode)
-          ? osAct(ctx, a.long ? 'longPress' : 'tap', a.target, (input, at) => (a.long ? input.longPress(at!, 800) : input.tap(at!)))
-          : action(
-              await call<ActionResult>(ctx, a.long ? 'longPress' : 'tap', {
-                target: a.target,
-                ...(a.mode ? { mode: a.mode } : {}),
-              }),
-            ),
-      ),
+      guarded(async () => {
+        const type = a.long ? 'longPress' : 'tap';
+        const rec = (r: ActionResult, os: boolean) => {
+          const target = stable(r, a.target);
+          if (target) record(ctx, { type, target, ...(os ? { os: true } : a.mode && a.mode !== 'auto' && !a.long ? { mode: a.mode as 'semantic' | 'touch' } : {}) } as FlowStep, r);
+        };
+        if (wantsOs(ctx, a.mode)) return osAct(ctx, type, a.target, (input, at) => (a.long ? input.longPress(at!, 800) : input.tap(at!)), (r) => rec(r, true));
+        const r = await call<ActionResult>(ctx, type, { target: a.target, ...(a.mode ? { mode: a.mode } : {}) });
+        rec(r, false);
+        return action(r);
+      }),
   },
   {
     name: 'mobile_type',
@@ -214,15 +231,31 @@ export const MOBILE_TOOLS: MobileTool[] = [
     summary: (a) => `Type into ${quote(a.target)}${a.mode === 'os' ? ' (OS)' : ''}`,
     run: (a, ctx) =>
       guarded(async () => {
+        const rec = (r: ActionResult, os: boolean, secure: boolean) => {
+          const target = stable(r, a.target);
+          if (!target) return;
+          // Secret text is never stored: replay reads it from an environment variable.
+          const text = secure && a.text ? `\${${secretVar(target)}}` : String(a.text ?? '');
+          record(ctx, { type: 'type', target, text, replace: a.replace !== false, ...(a.submit === true ? { submit: true } : {}), ...(os ? { os: true } : {}) }, r);
+        };
         if (wantsOs(ctx, a.mode)) {
-          if (a.replace !== false) await call<ActionResult>(ctx, 'clearText', { target: a.target });
-          return osAct(ctx, 'type', a.target, async (input, at) => {
-            await input.tap(at!);
-            if (a.text) await input.typeText(String(a.text));
-            if (a.submit === true) await input.pressKey('enter');
-          });
+          const cleared = a.replace !== false ? await call<ActionResult>(ctx, 'clearText', { target: a.target }) : undefined;
+          const secure = cleared ? cleared.detail?.secure === true : (await call<{ element?: { secure?: boolean } }>(ctx, 'resolve', { target: a.target })).element?.secure === true;
+          return osAct(
+            ctx,
+            'type',
+            a.target,
+            async (input, at) => {
+              await input.tap(at!);
+              if (a.text) await input.typeText(String(a.text));
+              if (a.submit === true) await input.pressKey('enter');
+            },
+            (r) => rec(r, true, secure),
+          );
         }
-        return action(await call<ActionResult>(ctx, 'typeText', { target: a.target, text: a.text, replace: a.replace !== false, submit: a.submit === true }));
+        const r = await call<ActionResult>(ctx, 'typeText', { target: a.target, text: a.text, replace: a.replace !== false, submit: a.submit === true });
+        rec(r, false, r.detail?.secure === true);
+        return action(r);
       }),
   },
   {
@@ -236,15 +269,16 @@ export const MOBILE_TOOLS: MobileTool[] = [
     },
     summary: (a) => `Scroll ${String(a.direction)}`,
     run: (a, ctx) =>
-      guarded(async () =>
-        action(
-          await call<ActionResult>(ctx, 'scroll', {
-            direction: a.direction,
-            ...(a.target ? { target: a.target } : {}),
-            ...(typeof a.amount === 'number' ? { amount: a.amount } : {}),
-          }),
-        ),
-      ),
+      guarded(async () => {
+        const r = await call<ActionResult>(ctx, 'scroll', {
+          direction: a.direction,
+          ...(a.target ? { target: a.target } : {}),
+          ...(typeof a.amount === 'number' ? { amount: a.amount } : {}),
+        });
+        const target = a.target ? stable(r, a.target) : undefined;
+        record(ctx, { type: 'scroll', direction: a.direction as 'up', ...(target ? { target } : {}), ...(typeof a.amount === 'number' ? { amount: a.amount } : {}) }, r);
+        return action(r);
+      }),
   },
   {
     name: 'mobile_scroll_to',
@@ -252,7 +286,13 @@ export const MOBILE_TOOLS: MobileTool[] = [
     description: 'Scroll until the target element is visible (pages through virtualized lists if it is not rendered yet).',
     shape: { target },
     summary: (a) => `Scroll to ${quote(a.target)}`,
-    run: (a, ctx) => guarded(async () => action(await call<ActionResult>(ctx, 'scrollTo', { target: a.target }))),
+    run: (a, ctx) =>
+      guarded(async () => {
+        const r = await call<ActionResult>(ctx, 'scrollTo', { target: a.target });
+        const target = stable(r, a.target);
+        if (target) record(ctx, { type: 'scrollTo', target }, r);
+        return action(r);
+      }),
   },
   {
     name: 'mobile_swipe',
@@ -275,9 +315,13 @@ export const MOBILE_TOOLS: MobileTool[] = [
         const to = { x: Number(a.to_x), y: Number(a.to_y) };
         // In-process swipes are impossible on iOS: OS-level input is the only real option there.
         if (wantsOs(ctx, a.mode) || (a.mode !== 'auto' && ctx.device?.info.platform === 'ios' && ctx.os)) {
-          return osAct(ctx, 'swipe', undefined, (input, _at, screen) => input.swipe(screen(from), screen(to), ms));
+          return osAct(ctx, 'swipe', undefined, (input, _at, screen) => input.swipe(screen(from), screen(to), ms), (r) =>
+            record(ctx, { type: 'swipe', from, to, durationMs: ms, os: true }, r),
+          );
         }
-        return action(await call<ActionResult>(ctx, 'swipe', { from, to, durationMs: ms }));
+        const r = await call<ActionResult>(ctx, 'swipe', { from, to, durationMs: ms });
+        record(ctx, { type: 'swipe', from, to, durationMs: ms }, r);
+        return action(r);
       }),
   },
   {
@@ -293,22 +337,24 @@ export const MOBILE_TOOLS: MobileTool[] = [
     },
     summary: (a) => `Wait for ${quote(a.route ?? a.target ?? a.text)}`,
     run: (a, ctx) =>
-      guarded(async () =>
-        action(
-          await call<ActionResult>(
-            ctx,
-            'waitFor',
-            {
-              ...(a.route ? { route: a.route } : {}),
-              ...(a.target ? { target: a.target } : {}),
-              ...(a.text ? { text: a.text } : {}),
-              ...(a.gone ? { gone: true } : {}),
-              ...(a.timeout_ms ? { timeoutMs: a.timeout_ms } : {}),
-            },
-            20_000,
-          ),
-        ),
-      ),
+      guarded(async () => {
+        const r = await call<ActionResult>(
+          ctx,
+          'waitFor',
+          {
+            ...(a.route ? { route: a.route } : {}),
+            ...(a.target ? { target: a.target } : {}),
+            ...(a.text ? { text: a.text } : {}),
+            ...(a.gone ? { gone: true } : {}),
+            ...(a.timeout_ms ? { timeoutMs: a.timeout_ms } : {}),
+          },
+          20_000,
+        );
+        const target = a.target ? stable(r, a.target) : undefined;
+        // A wait in a recorded flow is an assertion about the app's state.
+        record(ctx, { type: 'waitFor', condition: { ...(a.route ? { route: String(a.route) } : {}), ...(target ? { target } : {}), ...(a.text ? { text: String(a.text) } : {}), ...(a.gone ? { gone: true } : {}), ...(typeof a.timeout_ms === 'number' ? { timeoutMs: a.timeout_ms } : {}) } }, r);
+        return action(r);
+      }),
   },
   {
     name: 'mobile_back',
@@ -316,7 +362,12 @@ export const MOBILE_TOOLS: MobileTool[] = [
     description: 'Navigate back (Android: in-app back dispatch; iOS: navigation.goBack()).',
     shape: {},
     summary: () => 'Go back',
-    run: (_a, ctx) => guarded(async () => action(await call<ActionResult>(ctx, 'back', {}))),
+    run: (_a, ctx) =>
+      guarded(async () => {
+        const r = await call<ActionResult>(ctx, 'back', {});
+        record(ctx, { type: 'back' }, r);
+        return action(r);
+      }),
   },
   {
     name: 'mobile_execute_sequence',
@@ -343,6 +394,15 @@ export const MOBILE_TOOLS: MobileTool[] = [
           { actions: a.actions, options: { timeoutMs: a.timeout_ms ?? 60_000, continueOnError: a.continue_on_error === true } },
           75_000,
         );
+        const actions = a.actions as Record<string, unknown>[];
+        for (const st of r.steps) {
+          const given = actions[st.step];
+          if (!st.ok || !given) continue;
+          const target = 'target' in given && given.target !== undefined ? stable(st, given.target) : undefined;
+          const step = { ...given, ...(target ? { target } : {}) } as SequenceAction;
+          if (step.type === 'type' && st.detail?.secure === true && target) step.text = `\${${secretVar(target)}}`;
+          record(ctx, step, st);
+        }
         return text(formatSequence(r), !r.ok);
       }),
   },
@@ -420,14 +480,23 @@ export const MOBILE_TOOLS: MobileTool[] = [
     shape: { button: z.string().min(1).describe('Button text, e.g. "OK" or "Cancel"'), mode: z.enum(['auto', 'os']).optional() },
     summary: (a) => `Press alert button ${quote(a.button)}`,
     run: (a, ctx) =>
-      guarded(async () =>
-        wantsOs(ctx, a.mode)
-          ? osAct(ctx, 'alert', undefined, async (input) => {
+      guarded(async () => {
+        if (wantsOs(ctx, a.mode)) {
+          return osAct(
+            ctx,
+            'alert',
+            undefined,
+            async (input) => {
               if (!input.tapText) throw new Error(`${input.name} cannot tap by text`);
               await input.tapText(String(a.button));
-            })
-          : action(await call<ActionResult>(ctx, 'pressAlertButton', { title: a.button })),
-      ),
+            },
+            (r) => record(ctx, { type: 'alert', button: String(a.button), os: true }, r),
+          );
+        }
+        const r = await call<ActionResult>(ctx, 'pressAlertButton', { title: a.button });
+        record(ctx, { type: 'alert', button: String(a.button) }, r);
+        return action(r);
+      }),
   },
   {
     name: 'mobile_dismiss_keyboard',
@@ -435,7 +504,12 @@ export const MOBILE_TOOLS: MobileTool[] = [
     description: 'Hide the on-screen keyboard (Keyboard.dismiss(), semantic). Useful when the keyboard covers the element you need.',
     shape: {},
     summary: () => 'Dismiss keyboard',
-    run: (_a, ctx) => guarded(async () => action(await call<ActionResult>(ctx, 'dismissKeyboard', {}))),
+    run: (_a, ctx) =>
+      guarded(async () => {
+        const r = await call<ActionResult>(ctx, 'dismissKeyboard', {});
+        record(ctx, { type: 'dismissKeyboard' }, r);
+        return action(r);
+      }),
   },
   {
     name: 'mobile_dismiss_logbox',
@@ -495,4 +569,3 @@ export const MOBILE_TOOLS: MobileTool[] = [
   },
 ];
 
-export const CONTROL_TOOLS = new Set(MOBILE_TOOLS.filter((t) => t.kind === 'control').map((t) => t.name));

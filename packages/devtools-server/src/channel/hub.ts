@@ -2,7 +2,8 @@ import type { WebSocket } from 'ws';
 import type { TurnStats } from 'react-native-agent-devtools-protocol';
 import { appStateBlock, selectionBlock } from '../agent/prompt.ts';
 import { toolDetail } from '../tools/format.ts';
-import { MOBILE_TOOLS, type ToolContext, type ToolOutput } from '../tools/mobileTools.ts';
+import type { ToolContext, ToolOutput } from '../tools/mobileTools.ts';
+import { TOOLS } from '../tools/registry.ts';
 import type { DeviceRegistry, DeviceSession } from '../transport/devices.ts';
 import { parseBridgeMessage, type BridgeMessage, type HubMessage } from './messages.ts';
 
@@ -28,8 +29,8 @@ export interface ChannelHubOptions {
   ask: (device: DeviceSession, title: string, detail: string) => Promise<boolean | undefined>;
   /** The chat bridge connected or went away. */
   onChange: () => void;
-  /** OS-level input for the mobile tools. */
-  os?: ToolContext['os'];
+  /** OS-level input and flow recording for the tools. */
+  tools?: Pick<ToolContext, 'os' | 'flows'>;
 }
 
 const errorOutput = (text: string): ToolOutput => ({ content: [{ type: 'text', text }], isError: true });
@@ -168,7 +169,7 @@ export class ChannelHub {
   }
 
   private async runTool(msg: Extract<BridgeMessage, { type: 'tool.call' }>, chat: boolean): Promise<ToolOutput> {
-    const tool = MOBILE_TOOLS.find((t) => t.name === msg.name);
+    const tool = TOOLS.find((t) => t.name === msg.name);
     if (!tool) return errorOutput(`Unknown tool ${msg.name}.`);
     if (chat && this.stopped && tool.kind === 'control') {
       return errorOutput('The developer pressed Stop in the app. Do not operate the app again until they send a new message.');
@@ -183,7 +184,7 @@ export class ChannelHub {
     }
     const out = await tool.run(msg.args, {
       device,
-      ...(this.opts.os ? { os: this.opts.os } : {}),
+      ...this.opts.tools,
       onRpc: (_m, r) => {
         if (turn) turn.deviceMs += r.deviceMs;
       },

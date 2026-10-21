@@ -15,7 +15,8 @@ import type { TurnStats } from 'react-native-agent-devtools-protocol';
 import { redactText } from 'react-native-agent-devtools-protocol';
 import type { RepoAccess } from '../security/repoAccess.ts';
 import { toolDetail } from '../tools/format.ts';
-import { CONTROL_TOOLS, MOBILE_TOOLS, type ToolContext } from '../tools/mobileTools.ts';
+import type { ToolContext } from '../tools/mobileTools.ts';
+import { CONTROL_TOOLS, TOOLS } from '../tools/registry.ts';
 import type { DeviceSession } from '../transport/devices.ts';
 import { agentEnv, agentSettings, authDecision, type AuthMode } from './credentials.ts';
 import { AsyncQueue } from './AsyncQueue.ts';
@@ -34,8 +35,8 @@ export interface AgentConfig {
   approve: (device: DeviceSession, title: string, detail: string) => Promise<boolean>;
   /** The API rejected the credentials mid-session (expired or revoked sign-in). */
   onAuthError?: (reason: string) => void;
-  /** OS-level input for the mobile tools. */
-  os?: ToolContext['os'];
+  /** OS-level input and flow recording for the tools. */
+  tools?: Pick<ToolContext, 'os' | 'flows'>;
 }
 
 /** Resolves to `fallback` after `ms`, without keeping the process alive once settled. */
@@ -78,7 +79,7 @@ const MOBILE_PREFIX = 'mcp__mobile__';
 
 function toolSummary(name: string, input: Record<string, unknown>): string {
   const short = name.startsWith(MOBILE_PREFIX) ? name.slice(MOBILE_PREFIX.length) : name;
-  const def = MOBILE_TOOLS.find((t) => t.name === short);
+  const def = TOOLS.find((t) => t.name === short);
   if (def) return def.summary(input);
   if (short === 'Read') return `Read ${String(input.file_path ?? '').split('/').slice(-2).join('/')}`;
   if (short === 'Grep') return `Search code for "${String(input.pattern ?? '').slice(0, 30)}"`;
@@ -128,11 +129,11 @@ export class AgentSession {
       version: '0.1.0',
       alwaysLoad: true,
       timeout: 90_000,
-      tools: MOBILE_TOOLS.map((t) =>
+      tools: TOOLS.map((t) =>
         tool(t.name, t.description, t.shape, async (args) => {
           const out = await t.run(args as Record<string, unknown>, {
             device: this.device,
-            ...(this.cfg.os ? { os: this.cfg.os } : {}),
+            ...this.cfg.tools,
             onRpc: (_m, r) => {
               if (this.turn) this.turn.deviceMs += r.deviceMs;
             },

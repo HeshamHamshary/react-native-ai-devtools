@@ -3,7 +3,8 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import WebSocket from 'ws';
 import { z } from 'zod';
-import { MOBILE_TOOLS, type ToolOutput } from '../tools/mobileTools.ts';
+import type { ToolOutput } from '../tools/mobileTools.ts';
+import { TOOLS } from '../tools/registry.ts';
 import { MCP_INSTRUCTIONS } from '../transport/mcpEndpoint.ts';
 import { parseHubMessage, type BridgeMessage, type HubMessage } from './messages.ts';
 
@@ -145,7 +146,7 @@ export async function runChannelBridge(opts: BridgeOptions): Promise<void> {
   const hub = new HubConnection(`ws://127.0.0.1:${opts.port}/channel`, opts.channel && process.env[CHAT_ENV] === '1', opts.token, opts.log);
   if (!opts.token) opts.log('no server token found: start the devtools server first (it creates one), then restart Claude Code');
 
-  for (const t of MOBILE_TOOLS) {
+  for (const t of TOOLS) {
     mcp.registerTool(
       t.name,
       { description: t.description, inputSchema: t.shape, annotations: { readOnlyHint: t.kind === 'read' } },

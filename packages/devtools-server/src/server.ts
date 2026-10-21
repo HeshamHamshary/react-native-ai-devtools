@@ -8,6 +8,9 @@ import { AgentSession, verifyAgentAuth } from './agent/AgentSession.ts';
 import { chooseAuthMode, stateDir as defaultStateDir, type AuthMode } from './agent/credentials.ts';
 import { DemoSession } from './agent/DemoSession.ts';
 import { Automation } from './automation/osInput.ts';
+import { FlowRecorder } from './flows/recorder.ts';
+import { FlowStore } from './flows/store.ts';
+import type { ToolContext } from './tools/mobileTools.ts';
 import { loadProjectInstructions } from './agent/prompt.ts';
 import { ChannelChat, ChannelHub } from './channel/hub.ts';
 import { Approvals } from './security/approvals.ts';
@@ -16,7 +19,7 @@ import { RepoAccess } from './security/repoAccess.ts';
 import { bearerOk, loadServerToken } from './security/serverToken.ts';
 import { DeviceRegistry, DeviceSession, RpcError } from './transport/devices.ts';
 import { createMcpHandler } from './transport/mcpEndpoint.ts';
-import { MOBILE_TOOLS } from './tools/mobileTools.ts';
+import { TOOLS } from './tools/registry.ts';
 
 export const SERVER_VERSION = '0.1.0';
 
@@ -108,7 +111,7 @@ type Availability = { available: boolean; reason?: string; source?: string; via?
 /**
  * A chat backend for one app: the built-in Agent SDK session, the developer's Claude
  * Code (channel), or the scripted demo. Another model provider would implement the
- * same shape, using MOBILE_TOOLS (provider-neutral zod schemas) for the app tools.
+ * same shape, using TOOLS (provider-neutral zod schemas) for the app tools.
  */
 type ChatSession = AgentSession | DemoSession | ChannelChat;
 
@@ -173,7 +176,9 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
   const approve = approvals.approve.bind(approvals);
   const automation = opts.automation ?? new Automation();
   const os = { automation, prefer: opts.osInput === true };
-  const hub = new ChannelHub({ devices, log, ask, os, onChange: () => void refreshAgent() });
+  /** What every tool call gets besides the device: OS-level input, flow recording and storage. */
+  const toolEnv: Pick<ToolContext, 'os' | 'flows'> = { os, flows: { recorder: new FlowRecorder(), store: new FlowStore(dir) } };
+  const hub = new ChannelHub({ devices, log, ask, tools: toolEnv, onChange: () => void refreshAgent() });
 
   let availability = await computeAvailability();
   const sessions = new Map<string, ChatSession>();
@@ -190,7 +195,7 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
     const conv = convOf(d);
     if (conv) conv.session = s;
   };
-  const mcp = opts.mcp ? createMcpHandler(devices, SERVER_VERSION, os) : undefined;
+  const mcp = opts.mcp ? createMcpHandler(devices, SERVER_VERSION, toolEnv) : undefined;
   let port = opts.port;
 
   const serverInfo = (session?: ChatSession, device?: DeviceSession): ServerInfo => {
@@ -225,7 +230,7 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
       instructions,
       log,
       approve,
-      os,
+      tools: toolEnv,
       onAuthError: (reason) => {
         if (authRejected) return;
         authRejected = reason;
@@ -317,11 +322,11 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
       if (url.pathname === '/api/tool' && req.method === 'POST') {
         // The agent's tools, for scripts and tests: same code path as the model's calls.
         const body = JSON.parse(await readBody(req)) as { name?: unknown; args?: Record<string, unknown>; device?: string };
-        const tool = MOBILE_TOOLS.find((t) => t.name === body.name);
+        const tool = TOOLS.find((t) => t.name === body.name);
         if (!tool) return json(res, 400, { error: `unknown tool ${String(body.name)}` });
         const device = devices.find(body.device);
         if (!device) return json(res, 409, { error: 'no device connected' });
-        const out = await tool.run(body.args ?? {}, { device, os });
+        const out = await tool.run(body.args ?? {}, { device, ...toolEnv });
         return json(res, 200, out);
       }
       if (url.pathname === '/api/rpc' && req.method === 'POST') {
