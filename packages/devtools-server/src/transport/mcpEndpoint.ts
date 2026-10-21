@@ -4,7 +4,7 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { MOBILE_TOOLS } from '../tools/mobileTools.ts';
 import type { DeviceRegistry } from './devices.ts';
 
-const INSTRUCTIONS =
+export const MCP_INSTRUCTIONS =
   'Tools to inspect and operate a React Native app running react-native-agent-devtools (debug build). ' +
   'Start with mobile_get_screen or mobile_get_ui; use refs (e12) from the snapshot as targets. ' +
   'Batch multi-step flows with mobile_execute_sequence. Results report the interaction mode actually used ' +
@@ -16,7 +16,7 @@ const INSTRUCTIONS =
  */
 export function createMcpHandler(devices: DeviceRegistry, version: string) {
   const build = () => {
-    const server = new McpServer({ name: 'react-native-agent-devtools', version }, { instructions: INSTRUCTIONS });
+    const server = new McpServer({ name: 'react-native-agent-devtools', version }, { instructions: MCP_INSTRUCTIONS });
     for (const t of MOBILE_TOOLS) {
       server.registerTool(
         t.name,

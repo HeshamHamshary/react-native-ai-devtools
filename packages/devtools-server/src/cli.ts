@@ -6,6 +6,8 @@ import { resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 
 import { agentEnv, claudeBinary } from './agent/account.ts';
+import { runChannelBridge } from './channel/bridge.ts';
+import { launchClaudeCode } from './channel/launch.ts';
 import { SERVER_VERSION, startServer } from './server.ts';
 
 const c = {
@@ -28,6 +30,10 @@ Usage:
   react-native-agent-devtools-server devices [--port N]  List connected apps
   react-native-agent-devtools-server login               Sign the in-app agent in (same as "Set up Claude" in the app)
   react-native-agent-devtools-server logout              Sign the in-app agent out
+  react-native-agent-devtools-server claude [--cwd DIR] [-- <claude args>]
+                                                         Start your own Claude Code with the app chat connected
+                                                         (channels, research preview; uses your Claude Code login)
+  react-native-agent-devtools-server channel             The channel bridge Claude Code starts (not run by hand)
 
 Options:
   --port <n>             Port (default 8765)
@@ -43,8 +49,12 @@ Options:
 
 The in-app chat uses the Claude Agent SDK. Tap "Set up Claude" in the app to sign in with your
 Anthropic Console account (API usage billing). ANTHROPIC_API_KEY or Bedrock/Vertex credentials in
-this process's environment also work. To drive the app from Claude Code instead:
+this process's environment also work.
+
+Or use your own Claude Code login, with no new API key:
+  react-native-agent-devtools-server claude              chat from the app, answered by your Claude Code session
   claude mcp add --transport http rn-agent http://127.0.0.1:8765/mcp
+                                                         drive the app from Claude Code in the terminal
 `;
 
 function lanAddresses(): string[] {
@@ -84,6 +94,7 @@ async function main() {
       'demo-agent': { type: 'boolean', default: false },
       iterations: { type: 'string', default: '20' },
       device: { type: 'string' },
+      cwd: { type: 'string' },
       help: { type: 'boolean', short: 'h', default: false },
     },
   });
@@ -116,6 +127,34 @@ async function main() {
     const args = command === 'login' ? ['auth', 'login', '--console'] : ['auth', 'logout'];
     const child = spawn(bin, args, { env: agentEnv(), stdio: 'inherit' });
     process.exitCode = await new Promise<number>((r) => child.on('close', (code) => r(code ?? 1)));
+    return;
+  }
+
+  if (command === 'channel') {
+    // Claude Code talks MCP over this process's stdio: nothing else may write to stdout.
+    const log = (line: string) => process.stderr.write(`[rn-agent channel] ${line}\n`);
+    process.stdin.on('end', () => process.exit(0));
+    await runChannelBridge({ port, version: SERVER_VERSION, log });
+    return;
+  }
+
+  if (command === 'claude') {
+    const base = process.env.INIT_CWD ?? process.cwd();
+    const bridgeCommand = [
+      process.execPath,
+      ...process.execArgv.filter((a) => a.startsWith('--conditions')),
+      process.argv[1]!,
+      'channel',
+      '--port',
+      String(port),
+    ];
+    process.exitCode = await launchClaudeCode({
+      port,
+      cwd: values.cwd ? resolve(base, values.cwd) : base,
+      bridgeCommand,
+      claudeArgs: positionals,
+      log: (line) => process.stdout.write(`${c.orange('✦')} ${line}\n`),
+    });
     return;
   }
 
@@ -182,7 +221,8 @@ async function main() {
     `               ${c.dim(`USB Android: adb reverse tcp:${server.port} tcp:${server.port}`)}`,
     `  ${c.bold('agent')}        ${avail.available ? c.green('ready') + c.dim(` (credentials: ${avail.source}${values.model ? `, model ${values.model}` : ''})`) : c.yellow(`not signed in — tap "Set up Claude" in the app`) + c.dim(avail.reason && !avail.reason.startsWith('Not signed in') ? ` (${avail.reason})` : '')}`,
     `  ${c.bold('repo access')}  ${repoRoots.length ? `read${values['allow-edits'] ? ' + approved edits' : '-only'}: ${repoRoots.join(', ')} ${c.dim('(secret files always excluded)')}` : c.dim('disabled (use --repo <path>)')}`,
-    `  ${c.bold('Claude Code')}  ${values['no-mcp'] ? c.dim('MCP disabled') : `claude mcp add --transport http rn-agent http://127.0.0.1:${server.port}/mcp`}`,
+    `  ${c.bold('Claude Code')}  chat from the app with your own Claude Code: react-native-agent-devtools-server claude ${c.dim('(channels preview)')}`,
+    `               ${values['no-mcp'] ? c.dim('MCP disabled') : `terminal only: claude mcp add --transport http rn-agent http://127.0.0.1:${server.port}/mcp`}`,
   ];
   if (values.lan) {
     out.push(

@@ -52,7 +52,15 @@ export interface TurnStats {
 
 export interface ServerInfo {
   version: string;
-  agent: { available: boolean; reason?: string; model?: string; /** The server can run Anthropic sign-in on the computer. */ setup?: boolean };
+  agent: {
+    available: boolean;
+    reason?: string;
+    model?: string;
+    /** The server can run Anthropic sign-in on the computer. */
+    setup?: boolean;
+    /** The chat goes to the developer's own Claude Code session (channel) instead of the in-app agent. */
+    via?: 'claude-code';
+  };
   repoAccess: 'none' | 'read' | 'read-write';
   network: 'loopback' | 'lan';
 }

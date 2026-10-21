@@ -19,7 +19,8 @@
     "bin",
     "lib",
     "src",
-    "!**/*.test.ts"
+    "!**/*.test.ts",
+    "!src/testing"
   ],
   "scripts": {
     "start": "node --conditions=react-native-agent-devtools-source src/cli.ts",

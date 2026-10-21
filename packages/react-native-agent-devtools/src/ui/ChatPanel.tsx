@@ -6,6 +6,7 @@ import {
   Platform,
   Pressable,
   ScrollView,
+  Share,
   StyleSheet,
   Text,
   TextInput,
@@ -23,7 +24,8 @@ const SUGGESTIONS = ['What screen am I on?', 'Check for errors', 'Take a screens
 function statusText(s: UIState): string {
   switch (s.connection) {
     case 'connected':
-      return s.server?.agent.available === false ? 'Connected · Claude not set up' : 'Connected';
+      if (s.server?.agent.available === false) return 'Connected · Claude not set up';
+      return s.server?.agent.via === 'claude-code' ? 'Connected · your Claude Code' : 'Connected';
     case 'connecting':
       return 'Connecting…';
     case 'pairing-required':
@@ -272,22 +274,44 @@ export function ChatPanel({ runtime, palette: p, insets, collapsed, onExpand, on
  * Anthropic Console account in the computer's browser (Claude Code's own
  * `auth login --console`), and the chat turns on by itself when that finishes.
  */
+const CLAUDE_CODE_COMMAND = 'react-native-agent-devtools-server claude';
+
 function SetUpClaude({ p, setup, canSetup, onSetup }: { p: Palette; setup: UIState['setup']; canSetup: boolean; onSetup: () => boolean }) {
-  if (!canSetup) return <Text style={[styles.setupNote, { color: p.muted }]}>The in-app agent is turned off on the devtools server.</Text>;
+  const [showClaudeCode, setShowClaudeCode] = useState(!canSetup);
   const waiting = setup?.state === 'waiting';
   return (
     <View style={styles.setup}>
-      <Pressable
-        accessibilityRole="button"
-        accessibilityLabel="Set up Claude"
-        accessibilityState={{ busy: waiting }}
-        onPress={onSetup}
-        style={({ pressed }) => [styles.setupBtn, { backgroundColor: p.accent, opacity: pressed ? 0.85 : 1 }]}
-      >
-        {waiting ? <ActivityIndicator size="small" color={p.accentText} /> : null}
-        <Text style={[styles.setupBtnText, { color: p.accentText }]}>{waiting ? 'Finish signing in on your computer' : 'Set up Claude'}</Text>
-      </Pressable>
-      {setup?.state === 'failed' ? <Text style={[styles.setupNote, { color: p.error }]}>{setup.message ?? 'Sign-in did not complete.'}</Text> : null}
+      {canSetup ? (
+        <>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Set up Claude"
+            accessibilityState={{ busy: waiting }}
+            onPress={onSetup}
+            style={({ pressed }) => [styles.setupBtn, { backgroundColor: p.accent, opacity: pressed ? 0.85 : 1 }]}
+          >
+            {waiting ? <ActivityIndicator size="small" color={p.accentText} /> : null}
+            <Text style={[styles.setupBtnText, { color: p.accentText }]}>{waiting ? 'Finish signing in on your computer' : 'Set up Claude'}</Text>
+          </Pressable>
+          {setup?.state === 'failed' ? <Text style={[styles.setupNote, { color: p.error }]}>{setup.message ?? 'Sign-in did not complete.'}</Text> : null}
+        </>
+      ) : null}
+      {showClaudeCode ? (
+        // The developer's own Claude Code answers the chat (channels): their login, no new API key.
+        <View style={styles.setup}>
+          <Text style={[styles.setupNote, { color: p.muted }]}>Use your own Claude Code login. Run this on your computer and keep it open:</Text>
+          <Text selectable style={[styles.command, { color: p.text, backgroundColor: p.code, borderColor: p.border }]}>
+            {CLAUDE_CODE_COMMAND}
+          </Text>
+          <Pressable accessibilityRole="button" hitSlop={8} onPress={() => Share.share({ message: CLAUDE_CODE_COMMAND })}>
+            <Text style={[styles.link, { color: p.accent }]}>Share / copy command</Text>
+          </Pressable>
+        </View>
+      ) : (
+        <Pressable accessibilityRole="button" hitSlop={8} onPress={() => setShowClaudeCode(true)}>
+          <Text style={[styles.link, { color: p.muted }]}>Use my Claude Code instead</Text>
+        </Pressable>
+      )}
     </View>
   );
 }
@@ -404,6 +428,8 @@ const styles = StyleSheet.create({
   setupBtn: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, borderRadius: 14, paddingHorizontal: 22, paddingVertical: 13 },
   setupBtnText: { fontSize: 16, fontWeight: '700' },
   setupNote: { fontSize: 13, lineHeight: 18, textAlign: 'center' },
+  link: { fontSize: 13.5, fontWeight: '600' },
+  command: { fontFamily: Platform.select({ ios: 'Menlo', default: 'monospace' }), fontSize: 12, paddingHorizontal: 10, paddingVertical: 6, borderRadius: 8, borderWidth: StyleSheet.hairlineWidth },
   perf: { marginHorizontal: 12, marginTop: 8, borderWidth: StyleSheet.hairlineWidth, borderRadius: 10, padding: 10, gap: 3 },
   perfText: { fontSize: 11.5 },
 });

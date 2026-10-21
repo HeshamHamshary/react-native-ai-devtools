@@ -117,6 +117,7 @@ export class DeviceSession extends EventEmitter {
 
 export class DeviceRegistry extends EventEmitter {
   private devices = new Map<string, DeviceSession>();
+  private focused?: string;
 
   add(d: DeviceSession): void {
     this.devices.set(d.id, d);
@@ -131,10 +132,16 @@ export class DeviceRegistry extends EventEmitter {
     return [...this.devices.values()];
   }
 
-  /** Most recently connected device (what MCP tools act on by default). */
+  /** The device the developer last chatted from, else the most recently connected one (what MCP tools act on by default). */
   active(): DeviceSession | undefined {
+    const focused = this.focused ? this.devices.get(this.focused) : undefined;
+    if (focused) return focused;
     const all = this.list();
     return all[all.length - 1];
+  }
+
+  focus(id: string): void {
+    this.focused = id;
   }
 
   get(id: string): DeviceSession | undefined {

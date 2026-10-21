@@ -9,6 +9,7 @@
   ],
   "scripts": {
     "server": "yarn workspace react-native-agent-devtools-server start",
+    "claude": "yarn workspace react-native-agent-devtools-server start claude",
     "example": "yarn workspace react-native-agent-devtools-example",
     "typecheck": "yarn workspaces foreach -A --exclude react-native-agent-devtools-monorepo run typecheck",
     "test": "yarn workspaces foreach -A --exclude react-native-agent-devtools-monorepo run test",

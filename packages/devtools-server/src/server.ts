@@ -5,6 +5,7 @@ import type { ClientMessage, ServerInfo } from 'react-native-agent-devtools-prot
 import { MAX_MESSAGE_BYTES, encode, isRpcMethod, parseClientMessage, redactText } from 'react-native-agent-devtools-protocol';
 import { claudeCodeSignIn, hasEnvCredentials, type SignInBackend, type SignInHandle } from './agent/account.ts';
 import { AgentSession, verifyAgentAuth } from './agent/AgentSession.ts';
+import { ChannelChat, ChannelHub } from './channel/hub.ts';
 import { DemoSession } from './agent/DemoSession.ts';
 import { Pairing, checkRequestOrigin, isLoopback } from './security/auth.ts';
 import { RepoAccess } from './security/repoAccess.ts';
@@ -42,11 +43,14 @@ export interface RunningServer {
   port: number;
   devices: DeviceRegistry;
   pairing: Pairing;
-  agent: () => { available: boolean; reason?: string; source?: string };
+  agent: () => Availability;
   close(): Promise<void>;
 }
 
 const HELLO_TIMEOUT_MS = 5_000;
+
+type Availability = { available: boolean; reason?: string; source?: string; via?: 'claude-code' };
+type ChatSession = AgentSession | DemoSession | ChannelChat;
 
 function readBody(req: IncomingMessage, limit = 1_000_000): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -80,8 +84,9 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
   let pendingSignIn: SignInHandle | undefined;
   /** Set when the API rejects the credentials mid-session; cleared by a new sign-in. */
   let authRejected: string | undefined;
-  const computeAvailability = async (): Promise<{ available: boolean; reason?: string; source?: string }> => {
+  const computeAvailability = async (): Promise<Availability> => {
     if (opts.demoAgent) return { available: true, source: 'demo agent (scripted, no model)' };
+    if (hub.chatAvailable) return { available: true, source: 'your Claude Code session (channel)', via: 'claude-code' };
     if (opts.agentAvailable) return opts.agentAvailable;
     if (!opts.agent) return { available: false, reason: 'agent disabled (--no-agent)' };
     if (authRejected) return { available: false, reason: `${authRejected} Tap "Set up Claude" to sign in again.` };
@@ -92,18 +97,14 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
     const v = await (opts.verifyAuth ?? verifyAgentAuth)();
     return v.ok ? { available: true, source: v.source } : { available: false, reason: v.reason };
   };
-  let availability = await computeAvailability();
-  const sessions = new Map<string, AgentSession | DemoSession>();
   const approvals = new Map<string, (ok: boolean) => void>();
-  const mcp = opts.mcp ? createMcpHandler(devices, SERVER_VERSION) : undefined;
-  let port = opts.port;
-
-  const approve = (device: DeviceSession, title: string, detail: string): Promise<boolean> =>
+  /** Ask on the device; resolves undefined when nobody answers within two minutes. */
+  const ask = (device: DeviceSession, title: string, detail: string): Promise<boolean | undefined> =>
     new Promise((resolve) => {
       const id = randomUUID();
       const timer = setTimeout(() => {
         approvals.delete(id);
-        resolve(false);
+        resolve(undefined);
       }, 120_000);
       approvals.set(id, (ok) => {
         clearTimeout(timer);
@@ -111,22 +112,34 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
       });
       device.send({ type: 'approval.request', id, title, detail, risk: 'high' });
     });
+  const approve = async (device: DeviceSession, title: string, detail: string): Promise<boolean> => (await ask(device, title, detail)) === true;
+  const hub = new ChannelHub({ devices, log, ask, onChange: () => void refreshAgent() });
 
-  const serverInfo = (session?: AgentSession | DemoSession): ServerInfo => ({
-    version: SERVER_VERSION,
-    agent: {
-      available: availability.available,
-      ...(availability.reason ? { reason: availability.reason } : {}),
-      ...(session?.modelName ?? opts.model ? { model: session?.modelName ?? opts.model } : {}),
-      setup: !opts.demoAgent && opts.agent,
-    },
-    repoAccess: repo.enabled ? (opts.allowEdits ? 'read-write' : 'read') : 'none',
-    network: opts.lan ? 'lan' : 'loopback',
-  });
+  let availability = await computeAvailability();
+  const sessions = new Map<string, ChatSession>();
+  const mcp = opts.mcp ? createMcpHandler(devices, SERVER_VERSION) : undefined;
+  let port = opts.port;
 
-  const newSession = (device: DeviceSession): AgentSession | DemoSession | undefined => {
+  const serverInfo = (session?: ChatSession): ServerInfo => {
+    const model = availability.via ? undefined : (session?.modelName ?? opts.model);
+    return {
+      version: SERVER_VERSION,
+      agent: {
+        available: availability.available,
+        ...(availability.reason ? { reason: availability.reason } : {}),
+        ...(model ? { model } : {}),
+        ...(availability.via ? { via: availability.via } : {}),
+        setup: !opts.demoAgent && opts.agent,
+      },
+      repoAccess: repo.enabled ? (opts.allowEdits ? 'read-write' : 'read') : 'none',
+      network: opts.lan ? 'lan' : 'loopback',
+    };
+  };
+
+  const newSession = (device: DeviceSession): ChatSession | undefined => {
     if (opts.demoAgent) return new DemoSession(device);
     if (!availability.available) return undefined;
+    if (availability.via === 'claude-code') return new ChannelChat(device, hub);
     if (opts.sessionFactory) return opts.sessionFactory(device);
     const s = new AgentSession(device, {
       model: opts.model,
@@ -198,6 +211,11 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
         await mcp(req, res, raw ? JSON.parse(raw) : undefined);
         return;
       }
+      if (url.pathname === '/api/channel/arm' && req.method === 'POST') {
+        // Called by the `claude` launcher right before it starts Claude Code.
+        hub.arm();
+        return json(res, 200, { ok: true });
+      }
       if (url.pathname === '/api/devices' && req.method === 'GET') {
         return json(res, 200, devices.list().map((d) => ({ id: d.id, label: d.label, info: d.info, remote: d.remote, stats: d.stats })));
       }
@@ -228,6 +246,16 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
       log(`rejected websocket: ${origin.reason}`);
       socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
       socket.destroy();
+      return;
+    }
+    if (new URL(req.url ?? '/', 'http://localhost').pathname === '/channel') {
+      // The Claude Code channel bridge runs on this computer: loopback only, even with --lan.
+      if (!isLoopback(req.socket.remoteAddress)) {
+        socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
+        socket.destroy();
+        return;
+      }
+      wss.handleUpgrade(req, socket, head, (ws) => hub.accept(ws));
       return;
     }
     wss.handleUpgrade(req, socket, head, (ws) => onSocket(ws, req));
@@ -293,6 +321,7 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
             device.send({ type: 'chat.error', message: 'The agent is still working on the previous message. Stop it first.', code: 'BUSY' });
             return;
           }
+          devices.focus(device.id);
           log(`chat ← ${device.label}: ${redactText(msg.text).slice(0, 120)}`);
           await session.send(msg.text, msg.id);
           return;

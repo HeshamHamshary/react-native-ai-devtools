@@ -382,6 +382,11 @@ export class Runtime {
       case 'chat.error':
         this.flushDeltas();
         this.currentAssistantId = undefined;
+        // A slow-response notice is informational: the turn is still running.
+        if (m.code === 'CHANNEL_SLOW') {
+          this.addMessage({ id: nextId('e'), role: 'system', text: m.message, ts: Date.now() });
+          break;
+        }
         this.addMessage({ id: nextId('e'), role: 'error', text: m.message, ts: Date.now() });
         this.store.set({ chat: 'idle' });
         break;
