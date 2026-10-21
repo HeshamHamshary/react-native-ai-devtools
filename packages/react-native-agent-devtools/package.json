@@ -17,6 +17,8 @@
     "lib",
     "android",
     "ios",
+    "plugin",
+    "app.plugin.js",
     "cpp",
     "*.podspec",
     "react-native.config.js",
