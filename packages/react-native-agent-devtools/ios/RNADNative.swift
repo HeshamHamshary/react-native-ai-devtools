@@ -53,6 +53,33 @@ public final class RNADNative: NSObject {
 
   @objc public static var bundleId: String { Bundle.main.bundleIdentifier ?? "" }
 
+  // MARK: - Private storage (pairing token)
+
+  private static let keychainService = "react-native-agent-devtools"
+
+  private static func keychainQuery(_ key: String) -> [String: Any] {
+    [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: keychainService, kSecAttrAccount as String: key]
+  }
+
+  @objc public static func storedValue(forKey key: String) -> String? {
+    var query = keychainQuery(key)
+    query[kSecReturnData as String] = true
+    query[kSecMatchLimit as String] = kSecMatchLimitOne
+    var item: CFTypeRef?
+    guard SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess, let data = item as? Data else { return nil }
+    return String(data: data, encoding: .utf8)
+  }
+
+  /// An empty value removes the entry. Stored for this device only, never synced or backed up.
+  @objc public static func setStoredValue(_ value: String, forKey key: String) -> Bool {
+    SecItemDelete(keychainQuery(key) as CFDictionary)
+    if value.isEmpty { return true }
+    var item = keychainQuery(key)
+    item[kSecValueData as String] = Data(value.utf8)
+    item[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+    return SecItemAdd(item as CFDictionary, nil) == errSecSuccess
+  }
+
   // MARK: - Windows and views
 
   static func appWindows() -> [UIWindow] {

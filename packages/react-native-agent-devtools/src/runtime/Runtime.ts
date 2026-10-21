@@ -31,6 +31,8 @@ export const LIBRARY_VERSION = '0.1.0';
 export interface ChatMessage {
   id: string;
   role: 'user' | 'assistant' | 'tool' | 'system' | 'error';
+  /** For system lines: warnings are shown more prominently. */
+  level?: 'info' | 'warning';
   text: string;
   ts: number;
   turnId?: string;
@@ -48,6 +50,10 @@ export interface UIState {
   connection: 'idle' | 'connecting' | 'connected' | 'disconnected' | 'pairing-required' | 'error';
   connectionDetail?: string;
   server?: ServerInfo;
+  /** Paired with the server: this app may approve code edits and Claude Code permissions. */
+  trusted?: boolean;
+  /** The developer chose to pair this app (as opposed to the server requiring it). */
+  pairingRequested?: boolean;
   serverUrl: string;
   chat: ChatState;
   turnId?: string;
@@ -109,7 +115,6 @@ export class Runtime {
     this.logs = new LogCollector(opts.logCapacity ?? 500, routeOf);
     this.network = new NetworkCollector(opts.network ?? {}, routeOf);
     this.pairingCode = opts.pairingCode;
-    this.deviceToken = (globalThis as { __RNAD_DEVICE_TOKEN__?: string }).__RNAD_DEVICE_TOKEN__;
     this.store = new Store<UIState>({
       connection: 'idle',
       serverUrl: opts.serverUrl ?? defaultServerUrl(),
@@ -163,10 +168,29 @@ export class Runtime {
     this.logs.install();
     this.network.install();
     this.nav.attach(this.opts.navigationRef);
-    this.connect();
+    // A paired device keeps its token across reloads and restarts (Keychain / app-private prefs).
+    void native
+      .getStoredValue(this.tokenKey())
+      .catch(() => undefined)
+      .then((token) => {
+        this.deviceToken = token;
+        if (!this.stopped) this.connect();
+      });
+  }
+
+  private stopped = false;
+
+  private tokenKey(): string {
+    return `token:${this.store.get().serverUrl}`;
+  }
+
+  private saveToken(token: string | undefined): void {
+    this.deviceToken = token;
+    void native.setStoredValue(this.tokenKey(), token).catch(() => undefined);
   }
 
   stop(): void {
+    this.stopped = true;
     this.conn?.stop();
     this.conn = undefined;
     this.logs.uninstall();
@@ -231,6 +255,28 @@ export class Runtime {
 
   submitPairingCode(code: string): void {
     this.pairingCode = code.trim().toUpperCase();
+    this.conn?.reconnect();
+  }
+
+  /** Pair this app voluntarily (simulators connect without pairing but cannot approve). */
+  requestPairing(): void {
+    this.store.set({ pairingRequested: true });
+  }
+
+  /** Leave the pairing screen; only possible when the server does not require pairing. */
+  cancelPairing(): void {
+    this.pairingCode = undefined;
+    this.store.set({ pairingRequested: false });
+    if (this.store.get().connection === 'pairing-required') {
+      this.store.set({ connection: 'connecting' });
+      this.conn?.reconnect();
+    }
+  }
+
+  /** Forget this app's pairing; the server keeps treating it as unpaired until it pairs again. */
+  unpair(): void {
+    this.saveToken(undefined);
+    this.store.set({ trusted: false });
     this.conn?.reconnect();
   }
 
@@ -328,15 +374,16 @@ export class Runtime {
   private onServerMessage(m: ServerMessage): void {
     switch (m.type) {
       case 'welcome':
-        if (m.deviceToken) {
-          this.deviceToken = m.deviceToken;
-          (globalThis as { __RNAD_DEVICE_TOKEN__?: string }).__RNAD_DEVICE_TOKEN__ = m.deviceToken;
-        }
+        if (m.deviceToken) this.saveToken(m.deviceToken);
+        // A stored token the server no longer accepts (revoked, or a different server).
+        else if (m.trusted === false && this.deviceToken) this.saveToken(undefined);
         this.pairingCode = undefined;
         this.store.set({
           connection: 'connected',
           connectionDetail: undefined,
           server: m.server,
+          trusted: m.trusted === true,
+          ...(m.trusted ? { pairingRequested: false } : {}),
           setup: undefined,
           // A re-welcome without an agent (e.g. credentials rejected mid-turn) ends any turn in progress.
           ...(m.server.agent.available ? {} : { chat: 'idle' as const }),
@@ -346,8 +393,14 @@ export class Runtime {
         this.store.set({ setup: { state: m.state, ...(m.message ? { message: m.message } : {}) } });
         break;
       case 'auth.required':
-        this.deviceToken = undefined;
-        this.store.set({ connection: 'pairing-required', connectionDetail: m.reason });
+        if (this.deviceToken) this.saveToken(undefined);
+        this.pairingCode = undefined;
+        this.store.set({ connection: 'pairing-required', connectionDetail: m.reason, trusted: false });
+        break;
+      case 'chat.notice':
+        this.flushDeltas();
+        this.currentAssistantId = undefined;
+        this.addMessage({ id: nextId('n'), role: 'system', level: m.level, text: m.text, ts: Date.now() });
         break;
       case 'chat.status':
         if (m.state === 'idle') this.flushDeltas();
@@ -382,11 +435,6 @@ export class Runtime {
       case 'chat.error':
         this.flushDeltas();
         this.currentAssistantId = undefined;
-        // A slow-response notice is informational: the turn is still running.
-        if (m.code === 'CHANNEL_SLOW') {
-          this.addMessage({ id: nextId('e'), role: 'system', text: m.message, ts: Date.now() });
-          break;
-        }
         this.addMessage({ id: nextId('e'), role: 'error', text: m.message, ts: Date.now() });
         this.store.set({ chat: 'idle' });
         break;

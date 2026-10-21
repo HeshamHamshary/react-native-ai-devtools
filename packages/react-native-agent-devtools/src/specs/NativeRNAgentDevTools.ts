@@ -97,6 +97,16 @@ export interface Spec extends TurboModule {
 
   /** Native-only UI the React tree cannot see (system alerts / dialogs). */
   getNativeOverlays(): Promise<CodegenTypes.UnsafeObject>;
+
+  /**
+   * The tool's own small private values (the device's pairing token): Keychain
+   * (this device only) on iOS, app-private SharedPreferences on Android.
+   * Resolves `{ value?: string }`.
+   */
+  getStoredValue(key: string): Promise<CodegenTypes.UnsafeObject>;
+
+  /** Store a value; an empty `value` removes it. Resolves `{ ok: boolean }`. */
+  setStoredValue(key: string, value: string): Promise<CodegenTypes.UnsafeObject>;
 }
 
 export default TurboModuleRegistry.get<Spec>('RNAgentDevTools');

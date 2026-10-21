@@ -142,6 +142,19 @@ static void (^rejecter(RCTPromiseRejectBlock reject))(NSString *, NSString *)
   resolve([RNADNative nativeOverlays]);
 }
 
+- (void)getStoredValue:(NSString *)key resolve:(RCTPromiseResolveBlock)resolve reject:(RCTPromiseRejectBlock)reject
+{
+  RNAD_GUARD(reject);
+  NSString *value = [RNADNative storedValueForKey:key];
+  resolve(value ? @{@"value" : value} : @{});
+}
+
+- (void)setStoredValue:(NSString *)key value:(NSString *)value resolve:(RCTPromiseResolveBlock)resolve reject:(RCTPromiseRejectBlock)reject
+{
+  RNAD_GUARD(reject);
+  resolve(@{@"ok" : @([RNADNative setStoredValue:value forKey:key])});
+}
+
 - (std::shared_ptr<facebook::react::TurboModule>)getTurboModule:(const facebook::react::ObjCTurboModule::InitParams &)params
 {
   return std::make_shared<facebook::react::NativeRNAgentDevToolsSpecJSI>(params);

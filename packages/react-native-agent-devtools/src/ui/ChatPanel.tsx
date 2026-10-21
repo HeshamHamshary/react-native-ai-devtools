@@ -146,7 +146,7 @@ export function ChatPanel({ runtime, palette: p, insets, collapsed, onExpand, on
   }
 
   const confirm = state.pendingConfirm;
-  const pairing = state.connection === 'pairing-required';
+  const pairing = state.connection === 'pairing-required' || state.pairingRequested === true;
   const needsSetup = state.server?.agent.available === false;
 
   return (
@@ -168,6 +168,9 @@ export function ChatPanel({ runtime, palette: p, insets, collapsed, onExpand, on
             </Text>
           </View>
         </View>
+        {state.connection === 'connected' && !state.trusted && !pairing ? (
+          <HeaderButton label="Pair this app" glyph="⚿" p={p} onPress={() => runtime.requestPairing()} />
+        ) : null}
         <HeaderButton label="New chat" glyph="＋" p={p} onPress={() => runtime.resetChat()} />
         <HeaderButton label="Performance" glyph="⏱" p={p} active={showPerf} onPress={() => setShowPerf((v) => !v)} />
         <HeaderButton label="Hide launcher" glyph="◌" p={p} onPress={onHideLauncher} />
@@ -225,7 +228,20 @@ export function ChatPanel({ runtime, palette: p, insets, collapsed, onExpand, on
       ) : null}
 
       {needsSetup && !pairing ? null : pairing ? (
-        <View style={[styles.composer, { borderColor: p.border }]}>
+        <View style={[styles.pairing, { borderColor: p.border }]}>
+          <View style={styles.pairingHead}>
+            <Text style={[styles.setupNote, styles.pairingText, { color: p.muted }]}>
+              {state.connection === 'pairing-required' && state.connectionDetail
+                ? state.connectionDetail
+                : 'Pair this app to approve code edits and Claude Code permissions from it. Enter the code shown in the server terminal.'}
+            </Text>
+            {state.pairingRequested ? (
+              <Pressable accessibilityRole="button" hitSlop={8} onPress={() => runtime.cancelPairing()}>
+                <Text style={[styles.link, { color: p.muted }]}>Cancel</Text>
+              </Pressable>
+            ) : null}
+          </View>
+          <View style={styles.pairingRow}>
           <TextInput
             value={code}
             onChangeText={setCode}
@@ -236,9 +252,10 @@ export function ChatPanel({ runtime, palette: p, insets, collapsed, onExpand, on
             style={[styles.input, { color: p.text, backgroundColor: p.surface }]}
             onSubmitEditing={() => runtime.submitPairingCode(code)}
           />
-          <Pressable onPress={() => runtime.submitPairingCode(code)} style={[styles.send, { backgroundColor: p.accent }]}>
+          <Pressable accessibilityRole="button" accessibilityLabel="Pair" onPress={() => runtime.submitPairingCode(code)} style={[styles.send, { backgroundColor: p.accent }]}>
             <Text style={[styles.sendGlyph, { color: p.accentText }]}>→</Text>
           </Pressable>
+          </View>
         </View>
       ) : (
         <View style={[styles.composer, { borderColor: p.border }]}>
@@ -424,6 +441,10 @@ const styles = StyleSheet.create({
   compactText: { flex: 1, fontSize: 13.5 },
   stopSmall: { width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center' },
   centered: { flexGrow: 1, justifyContent: 'center' },
+  pairing: { paddingHorizontal: 12, paddingTop: 8, gap: 8, borderTopWidth: StyleSheet.hairlineWidth },
+  pairingHead: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+  pairingText: { flex: 1, textAlign: 'left' },
+  pairingRow: { flexDirection: 'row', alignItems: 'flex-end', gap: 8 },
   setup: { alignItems: 'center', gap: 10 },
   setupBtn: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, borderRadius: 14, paddingHorizontal: 22, paddingVertical: 13 },
   setupBtnText: { fontSize: 16, fontWeight: '700' },

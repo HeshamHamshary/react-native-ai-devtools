@@ -2,6 +2,7 @@ package com.rnagentdevtools
 
 import android.app.Activity
 import android.app.AlertDialog
+import android.content.Context
 import android.content.DialogInterface
 import android.content.pm.ApplicationInfo
 import android.graphics.Bitmap
@@ -565,6 +566,24 @@ class RNAgentDevToolsModule(reactContext: ReactApplicationContext) :
     val result = Arguments.createMap()
     result.putArray("overlays", overlays)
     promise.resolve(result)
+  }
+
+  // ---- Private storage (pairing token) ----------------------------------------------
+
+  private val prefs
+    get() = reactApplicationContext.getSharedPreferences("react-native-agent-devtools", Context.MODE_PRIVATE)
+
+  override fun getStoredValue(key: String, promise: Promise) {
+    if (!debuggable) return promise.reject("RNAD_DISABLED", "react-native-agent-devtools is disabled in non-debuggable builds")
+    val value = prefs.getString(key, null)
+    promise.resolve(Arguments.createMap().apply { if (value != null) putString("value", value) })
+  }
+
+  /** An empty value removes the entry. App-private storage. */
+  override fun setStoredValue(key: String, value: String, promise: Promise) {
+    if (!debuggable) return promise.reject("RNAD_DISABLED", "react-native-agent-devtools is disabled in non-debuggable builds")
+    val ok = prefs.edit().apply { if (value.isEmpty()) remove(key) else putString(key, value) }.commit()
+    promise.resolve(Arguments.createMap().apply { putBoolean("ok", ok) })
   }
 
   companion object {

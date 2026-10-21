@@ -13,7 +13,8 @@
     "example": "yarn workspace react-native-agent-devtools-example",
     "typecheck": "yarn workspaces foreach -A --exclude react-native-agent-devtools-monorepo run typecheck",
     "test": "yarn workspaces foreach -A --exclude react-native-agent-devtools-monorepo run test",
-    "build": "yarn workspaces foreach -A -t --exclude react-native-agent-devtools-monorepo --exclude react-native-agent-devtools-example run build"
+    "build": "yarn workspaces foreach -A -t --exclude react-native-agent-devtools-monorepo --exclude react-native-agent-devtools-example run build",
+    "check:release-bundle": "node scripts/check-release-bundle.mjs"
   },
   "engines": {
     "node": ">= 22.18.0"

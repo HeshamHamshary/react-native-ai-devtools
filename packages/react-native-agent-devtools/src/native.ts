@@ -103,6 +103,14 @@ export const native = {
     const r = (await need().getNativeOverlays()) as { overlays?: NativeOverlay[] };
     return r.overlays ?? [];
   },
+  getStoredValue: async (key: string): Promise<string | undefined> => {
+    if (!mod) return undefined;
+    const r = (await mod.getStoredValue(key)) as { value?: string };
+    return r.value || undefined;
+  },
+  setStoredValue: async (key: string, value: string | undefined): Promise<void> => {
+    if (mod) await mod.setStoredValue(key, value ?? '');
+  },
   getSafeAreaInsets: async (): Promise<{ top: number; bottom: number; left: number; right: number }> => {
     if (!mod) return { top: Platform.OS === 'ios' ? 47 : 24, bottom: Platform.OS === 'ios' ? 34 : 0, left: 0, right: 0 };
     return (await mod.getSafeAreaInsets()) as { top: number; bottom: number; left: number; right: number };
