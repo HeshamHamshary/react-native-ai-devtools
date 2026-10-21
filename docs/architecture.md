@@ -8,12 +8,13 @@ App (debug build)                                         Developer machine
 │  Anchor ─▶ your app            Overlay (chat) │          │  HTTP/WS :8765 (loopback; --lan opt-in)      │
 │                                               │   JSON   │   ├─ Host/Origin checks, pairing tokens      │
 │  Runtime                                      │◀────────▶│   ├─ DeviceRegistry → DeviceSession.rpc()    │
-│   ├─ Inspector  (fiber walk → snapshot)       │    WS    │   ├─ AgentSession (Claude Agent SDK)          │
-│   ├─ Executor   (actions, settle, guards)     │          │   │    mobile_* tools (in-process MCP)        │
-│   ├─ LogCollector / NetworkCollector / Nav    │          │   │    Read/Grep/Glob (PreToolUse allowlist)  │
-│   ├─ Connection (reconnect, hello, rpc)       │          │   ├─ /mcp  (Claude Code, stateless HTTP)       │
-│   └─ native (TurboModule)                     │          │   ├─ sign-in (claude auth login --console)     │
-│        iOS: Swift (UIKit) + ObjC++ shim       │          │   └─ /api/rpc, /api/devices (CLI/bench)        │
+│   ├─ Inspector  (fiber walk → snapshot)       │    WS    │   ├─ AgentSession (Claude Agent SDK)         │
+│   ├─ Executor   (actions, settle, guards)     │          │   │    mobile_* tools (in-process MCP)       │
+│   ├─ LogCollector / NetworkCollector / Nav    │          │   │    Read/Grep/Glob (PreToolUse allowlist) │
+│   ├─ Connection (reconnect, hello, rpc)       │          │   ├─ /mcp  (Claude Code, stateless HTTP)     │
+│   └─ native (TurboModule)                     │          │   ├─ sign-in (claude auth login --console)   │
+│                                               │          │   ├─ /channel ◀─ bridge ◀─ your claude       │
+│        iOS: Swift (UIKit) + ObjC++ shim       │          │   └─ /api/rpc, /api/devices (CLI/bench)      │
 │        Android: Kotlin                        │          └──────────────────────────────────────────────┘
 └──────────────────────────────────────────────┘
 ```
@@ -92,7 +93,16 @@ App (debug build)                                         Developer machine
   - Sources: the Anthropic Console sign-in started by "Set up Claude" (Claude Code's `auth login --console`, run by the server), `ANTHROPIC_API_KEY`, or Bedrock/Vertex/Foundry.
   - Every Claude Code process the server starts uses a dedicated `CLAUDE_CONFIG_DIR` (`~/.config/react-native-agent-devtools/claude`). Before the first prompt, `accountInfo()` must report an API-key or cloud source and no subscription; otherwise the session fails closed.
   - Sign-in progress reaches the device as `setup.status` (`waiting` / `failed`); success arrives as a fresh `welcome` with the agent available.
-- **Claude Code:** `/mcp` exposes the same tool definitions over stateless Streamable HTTP and acts on the most recently connected device.
+- **Claude Code, chat in the app (channels):**
+  - `react-native-agent-devtools-server claude` registers a stdio MCP server (`… channel`) with Claude Code and starts `claude --dangerously-load-development-channels server:rn-agent`.
+  - That bridge declares `claude/channel` and `claude/channel/permission`. It connects to the devtools server over a loopback WebSocket (`/channel`) and serves:
+    - `mobile_*` tools, executed by the devtools server on the device that asked
+    - a `reply` tool
+    - app messages, pushed into the session as `notifications/claude/channel` with an `<app_state>` snapshot and a `chat_id`
+    - Claude Code's permission prompts, forwarded to the device as `approval.request` and answered back with `notifications/claude/channel/permission`
+  - The server shows tool calls as tool rows. A `reply` ends the turn.
+  - Only the bridge started by the launcher carries the chat. The launcher arms the server just before starting Claude Code, and it also sets an env flag.
+- **Claude Code in the terminal:** `/mcp` exposes the same tool definitions over stateless Streamable HTTP and acts on the device you last chatted from, else the most recently connected one.
 - **Repository access:** the built-in tools are limited to `Read`/`Grep`/`Glob` (plus `Edit`/`Write` with `--allow-edits`). A PreToolUse hook enforces the root allowlist and the secret-file denylist, and resolves symlinks. Bash and web tools are disallowed.
 
 ## Protocol (JSON over one WebSocket)
@@ -101,6 +111,8 @@ App (debug build)                                         Developer machine
 |---|---|
 | device → server | `hello` (device info, capabilities, token or pairing code), `chat.send`, `chat.cancel`, `chat.reset`, `rpc.result`, `approval.response`, `setup.open`, `ping` |
 | server → device | `welcome`, `auth.required`, `chat.status`, `chat.delta`, `chat.text`, `chat.tool`, `chat.done`, `chat.error`, `rpc.call`, `rpc.cancel`, `approval.request`, `setup.status`, `pong` |
+
+Between the server and the Claude Code channel bridge (loopback `/channel`): `hello`/`welcome`, `tool.call`/`tool.result`, `reply`/`reply.result`, `message`, `stop`, `permission.request`/`permission.verdict`.
 
 Device RPCs: `getScreen`, `getUI`, `resolve`, `tap`, `longPress`, `typeText`, `clearText`, `scroll`, `scrollTo`, `swipe`, `waitFor`, `back`, `runSequence`, `screenshot`, `getLogs`, `getNetwork`, `getNavigation`, `getPerf`, `getCapabilities`.
 

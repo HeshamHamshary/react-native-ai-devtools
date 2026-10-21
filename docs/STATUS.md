@@ -28,10 +28,11 @@ packages/react-native-agent-devtools/
   src/__tests__/                 27 tests
 packages/devtools-server/
   src/agent/                     Agent SDK session, auth gate, Console sign-in, prompt, demo agent
+  src/channel/                   Claude Code channel: launcher, stdio bridge, hub
   src/security/                  pairing, origin/host checks, repo allowlist
   src/transport/                 device registry/RPC, MCP endpoint
   src/tools/                     15 mobile_* tool definitions + formatting
-  src/*.test.ts                  20 tests
+  src/**/*.test.ts               25 tests
 docs/                            review, architecture, setup, capability matrix, security, this file
 ```
 
@@ -45,7 +46,11 @@ node .yarn/releases/yarn-4.11.0.cjs example ios | android              # build +
 node .yarn/releases/yarn-4.11.0.cjs test && node .yarn/releases/yarn-4.11.0.cjs build
 ```
 
-**Connect Claude.** Tap "Set up Claude" in the app panel and finish signing in with your Anthropic Console account in your computer's browser. The chat turns on by itself. The alternative is to drive the app from your own Claude Code session:
+**Connect Claude.** Either:
+- **Your own Claude Code answers the app chat** (channels, research preview; uses your existing Claude Code login, no API key): run `node .yarn/releases/yarn-4.11.0.cjs claude` and keep that terminal open.
+- **The built-in agent:** tap "Set up Claude" in the app panel and sign in with an Anthropic Console account.
+
+Or drive the app from Claude Code in the terminal:
 
 ```bash
 claude mcp add --transport http rn-agent http://127.0.0.1:8765/mcp
@@ -56,7 +61,7 @@ claude mcp add --transport http rn-agent http://127.0.0.1:8765/mcp
 | Check | Result |
 |---|---|
 | `packages/protocol`: `node --test` | **13/13 passed** |
-| `packages/devtools-server`: `node --test` (pairing, origin/rebinding, repo allowlist, RPC, MCP, LAN pairing over a real interface, sign-in flow, auth gate, agent config isolation against the real Claude Code binary) | **20/20 passed** |
+| `packages/devtools-server`: `node --test` (pairing, origin/rebinding, repo allowlist, RPC, MCP, LAN pairing over a real interface, sign-in flow, auth gate, agent config isolation against the real Claude Code binary, channel bridge contract with a fake Claude Code, launcher with a fake `claude`) | **25/25 passed** |
 | `packages/react-native-agent-devtools`: jest (discovery, refs, hit coverage, pruning, matching, executor modes and refusals, sequences, collectors) | **27/27 passed** |
 | `yarn typecheck` (all workspaces) | passed |
 | `yarn build`: Bob (RN lib), tsc (protocol, server); compiled CLI runs from `bin/` | passed |
@@ -104,6 +109,14 @@ claude mcp add --transport http rn-agent http://127.0.0.1:8765/mcp
 
   iOS shows the same panel. The live re-enable after a successful sign-in is verified by test with a stubbed sign-in.
 - `<AgentTarget>` explicit instrumentation; gesture-handler button detection.
+- **App chat through your own Claude Code (channels).** Verified on the Android emulator with a local fake Claude Code (an MCP client that starts the real bridge over stdio; no model):
+  - The app switched to "your Claude Code" without reconnecting.
+  - "What screen am I on?" arrived as a channel event with the screen snapshot.
+  - The fake's `mobile_get_screen` call appeared as a tool row.
+  - Its `reply` showed in the app.
+  - Closing it returned the app to the setup screen.
+
+  By test: permission relay, Stop (Claude Code told, app actions refused), tools-only for sessions not started by the launcher, rejection of web pages, and the launcher's version check and registration.
 
 ### Partial / not yet verified
 
@@ -112,6 +125,11 @@ claude mcp add --transport http rn-agent http://127.0.0.1:8765/mcp
 - **Physical devices** (iPhone over LAN, Android over USB or LAN): code paths exist; untested.
 - **Tapping the iOS chat panel:** the simulator can't be tapped from automation here, so the panel was verified visually (opened via `initiallyOpen`) and on Android via adb input.
 - **Native alerts:** detected read-only; their buttons can't be tapped yet.
+- **The channel with a real Claude Code.**
+  - Not run here: no Claude Code session was started on the owner's account.
+  - Built from the documented channel contract (code.claude.com/docs/en/channels-reference).
+  - Needs Claude Code 2.1.234 or later. The owner has 2.1.71.
+  - Company-managed accounts need channels enabled by an Owner.
 - **A completed sign-in.**
   - Not run here, because it needs your Anthropic account.
   - The gate expects `accountInfo().apiKeySource === '/login managed key'`. That label comes from Claude Code 2.1.306's own description of its credential sources: "an API key created and stored by /login with an Anthropic Console account".
@@ -211,7 +229,7 @@ One turn, not a benchmark. It ran unintentionally on the owner's login; see the 
 
 ## Next priorities
 
-1. Complete "Set up Claude" once with a real Console account and finish acceptance steps 4–5 and 14–15 in the app. Confirm the gate reports `/login managed key`.
+1. Run `… claude` with a real, up-to-date Claude Code (channels enabled for the org) and finish acceptance steps 4–5 and 14–15 in the app. Alternatively, complete "Set up Claude" with a Console account and confirm the gate reports `/login managed key`.
 2. Optional OS-level backend:
    - Android: adb `input` and the UiAutomation helper.
    - iOS simulator: Callstack agent-device (MIT, pinned) or a minimal public-API XCUITest runner.

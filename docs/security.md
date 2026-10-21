@@ -32,7 +32,16 @@ This is a development tool with a lot of power: it can read the screen, operate 
 | Simulators/emulators | loopback (`localhost`, `10.0.2.2`) | as above |
 | `--lan` | all interfaces, with a printed warning | 8-char single-use pairing codes (10 min TTL, lockout after 5 failures) → 12 h device tokens; plain `ws://`, so trusted networks only |
 | `/mcp`, `/api/*` | loopback only, **even with `--lan`** | Origin/Host checks |
+| `/channel` (Claude Code bridge) | loopback only, **even with `--lan`** | Origin/Host checks; only the bridge started by the `claude` launcher (which arms the server just before) carries the app chat, and other bridges get tools only |
 | Sign-in | started only by a connected (and, on LAN, paired) device's `setup.open` | runs on the computer; one attempt at a time, 10-minute timeout, cancelled on shutdown |
+
+## Chat through your own Claude Code (channels)
+
+- The model runs inside your Claude Code session, on its own login. The devtools server and the bridge hold no credentials and never call a model.
+- **Pre-allowed tools:** the launcher pre-allows only the bridge's tools (`--allowedTools mcp__rn-agent`). Everything else Claude Code does follows your normal Claude Code permissions. Its approval prompts are also relayed to the app, and either side can answer. Anyone who can use a connected device's chat can therefore approve those prompts, which is why devices must be on loopback or paired.
+- **On-device safeguards still apply:** confirmation of sensitive taps and the duplicate-submit guard.
+- **Stop:** pressing Stop tells Claude Code to stop and makes the bridge refuse app actions until your next message. It can't interrupt work Claude Code is doing in your terminal.
+- **Untrusted content:** messages carry a screen snapshot, which the bridge's instructions label as untrusted data.
 
 ## Agent permissions (least privilege)
 

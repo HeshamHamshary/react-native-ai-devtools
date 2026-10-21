@@ -35,9 +35,10 @@ It is a development and QA tool. When `__DEV__` is false it renders only your ap
   - the route and navigation history
   - native alerts
   - screenshots, with optional ref-labelled boxes
-- **Two ways to talk to it:**
-  - The in-app floating chat, backed by the Claude Agent SDK. One tap on "Set up Claude" signs in with your Anthropic Console account in your computer's browser.
-  - Your existing Claude Code terminal session, through the server's MCP endpoint, using your normal Claude Code login.
+- **Three ways to talk to it:**
+  - The in-app chat, answered by **your own Claude Code session** through a channel (Claude Code research preview), using your normal Claude Code login: `react-native-agent-devtools-server claude`.
+  - The in-app chat, answered by the built-in agent (Claude Agent SDK). One tap on "Set up Claude" signs in with your Anthropic Console account in your computer's browser.
+  - Your Claude Code terminal session, through the server's MCP endpoint.
 
 ## Quick start (example app)
 
@@ -58,11 +59,13 @@ node .yarn/releases/yarn-4.11.0.cjs example start
 node .yarn/releases/yarn-4.11.0.cjs example ios       # or: example android
 ```
 
-Tap the ✦ button. The first time, tap **Set up Claude** and finish signing in in your computer's browser. Then ask "What screen am I on?". The demo login is any email plus `password123`.
+Tap the ✦ button. To give the chat a brain, either run the command below so your own Claude Code answers, or tap **Set up Claude** and sign in with an Anthropic Console account. Then ask "What screen am I on?". The demo login is any email plus `password123`.
 
-No Console account? Run the server with `--demo-agent` for a clearly labelled scripted assistant (UI development only). Or connect Claude Code instead:
+For UI work with no Claude at all, run the server with `--demo-agent`: a clearly labelled scripted assistant.
 
 ```bash
+node .yarn/releases/yarn-4.11.0.cjs claude     # chat in the app, answered by your Claude Code
+# or terminal only:
 claude mcp add --transport http rn-agent http://127.0.0.1:8765/mcp
 # then, in Claude Code: "log into the example app and open booking details"
 ```

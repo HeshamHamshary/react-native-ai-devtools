@@ -43,5 +43,6 @@ node --conditions=react-native-agent-devtools-source src/cli.ts bench --device a
   - Control endpoints stay loopback-only.
   - New device messages need validation in `packages/protocol` and a test.
 - **Agent credentials:** never add a path that lets the agent run on a personal claude.ai login.
+- **No real Claude calls in tests or checks.** Use `src/testing/FakeDevice.ts` and fake MCP clients (see `src/channel/channel.test.ts`). Never start a sign-in or a Claude Code session on someone's account to test something.
 - **Licenses:** don't copy code from projects with incompatible licenses. See [docs/competitive-architecture-review.md](docs/competitive-architecture-review.md#4-license-and-reuse-considerations).
 - **Commits:** small and per module, with what changed and how it was verified.

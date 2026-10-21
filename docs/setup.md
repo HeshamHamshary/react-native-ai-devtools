@@ -60,9 +60,25 @@ npx react-native-agent-devtools-server bench --iterations 20 --device android
 
 ### Connecting Claude
 
-There are two supported paths:
+There are three supported paths. The first two put the chat in the app.
 
-1. **In-app chat (Claude Agent SDK).**
+1. **In-app chat, answered by your own Claude Code (channels).** This uses the Claude Code login you already have, including a company-managed one, and creates no API key.
+   ```bash
+   react-native-agent-devtools-server claude            # in this repo: node .yarn/releases/yarn-4.11.0.cjs claude
+   ```
+   Run it in your project directory, with the devtools server running, and keep that terminal open. It does three things:
+   - Checks that your Claude Code is recent enough (2.1.234 or later; run `claude update` otherwise).
+   - Registers a small local bridge with Claude Code for this project (`claude mcp add rn-agent`, local scope).
+   - Starts `claude --dangerously-load-development-channels server:rn-agent --allowedTools mcp__rn-agent`, plus any arguments after `--`.
+
+   Confirm the development-channel prompt Claude Code shows. The app switches to "your Claude Code" by itself; messages you type there arrive in that session with a snapshot of the screen, and Claude answers in the app. The terminal shows the work as it happens. Claude Code's "allow this tool?" prompts appear in the app too, so you can answer them there.
+
+   Things to know:
+   - **Channels are a Claude Code research preview.** A custom channel like this one needs the development flag above until it's on an approved list.
+   - **Company-managed accounts:** an organization Owner must enable channels (Organization settings → Claude Code → Channels, or `channelsEnabled` in managed settings). Until then Claude Code starts but says channels are blocked by org policy, and after 30 seconds the app says it's still waiting.
+   - Replies arrive whole, not word by word. Stop in the app tells Claude Code to stop and blocks app actions until your next message; it can't interrupt a step already running in the terminal.
+   - Only the Claude Code started by this command carries the app chat. Other Claude Code sessions in the project that load the bridge just get the `mobile_*` tools.
+2. **In-app chat, answered by the built-in agent (Claude Agent SDK).**
    - **Tap "Set up Claude" in the app's panel.** Your computer's browser opens Anthropic's sign-in page. Sign in with your Anthropic Console account and approve; the chat turns on by itself. Nothing to copy or paste.
 
      Under the hood, the server runs Claude Code's documented `claude auth login --console`, using the Claude Code binary bundled with the Agent SDK. It runs in a config directory used only by the agent (`~/.config/react-native-agent-devtools/claude`), so it never touches your own Claude Code login. Approving creates an API key in your Console organization, managed by Claude Code. Usage is billed to that organization at API rates. If your organization controls who may create API keys, check with your admin first.
@@ -70,12 +86,12 @@ There are two supported paths:
    - **Or** start the server with `ANTHROPIC_API_KEY` (or `CLAUDE_CODE_USE_BEDROCK=1` / `CLAUDE_CODE_USE_VERTEX=1` and the cloud credentials) in its environment. The environment takes precedence over the sign-in.
    - **Sign out:** `react-native-agent-devtools-server logout`.
 
-   Credentials never reach the app. Signing in with a Claude subscription (Pro, Max, Team or Enterprise chat plans) is not offered and is refused if found. Anthropic's Agent SDK terms don't allow products to use claude.ai login, which is the main difference from the Claude in Chrome extension. To use your subscription, take path 2. Before the first prompt, the server checks which credential source the agent would use (`accountInfo()`, no model call) and fails closed.
-2. **Claude Code.** Uses your own Claude Code login.
+   Credentials never reach the app. Signing in with a Claude subscription (Pro, Max, Team or Enterprise chat plans) is not offered and is refused if found. Anthropic's Agent SDK terms don't allow products to use claude.ai login, which is the main difference from the Claude in Chrome extension. To use your subscription, take path 1 or 3. Before the first prompt, the server checks which credential source the agent would use (`accountInfo()`, no model call) and fails closed.
+3. **Claude Code in the terminal.** Uses your own Claude Code login; the conversation stays in the terminal.
    ```bash
    claude mcp add --transport http rn-agent http://127.0.0.1:8765/mcp
    ```
-   Then ask Claude Code in your terminal to inspect or drive the app. It gets the same `mobile_*` tools. The conversation lives in the terminal, because Claude Code has no documented API for an app to inject messages into an existing session.
+   Then ask Claude Code to inspect or drive the app. It gets the same `mobile_*` tools. (Use a different name than `rn-agent` if you also use path 1 in the same project.)
 
 ## 3. Connect a device
 
