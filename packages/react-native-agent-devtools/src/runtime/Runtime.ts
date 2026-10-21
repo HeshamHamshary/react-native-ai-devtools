@@ -1015,8 +1015,10 @@ export class Runtime {
     byOp.forEach((v, k) => {
       ops[k] = { n: v.length, p50: pct(v, 50), p95: pct(v, 95) };
     });
+    const hermes = (globalThis as { HermesInternal?: { getInstrumentedStats?: () => Record<string, number> } }).HermesInternal?.getInstrumentedStats?.();
     return {
       ops,
+      ...(hermes ? { memory: { jsHeapMB: Math.round((hermes.js_heapSize ?? 0) / 1e5) / 10, jsAllocatedMB: Math.round((hermes.js_allocatedBytes ?? 0) / 1e5) / 10, logEntries: this.logs.buffer.size, networkEntries: this.network.buffer.size } } : {}),
       rpc: { calls: this.rpcStats.calls, avgDeviceMs: this.rpcStats.calls ? Math.round(this.rpcStats.deviceMs / this.rpcStats.calls) : 0 },
       lastSnapshot: this.inspector.last?.stats,
       transport: { bytesIn: this.conn?.bytesIn ?? 0, bytesOut: this.conn?.bytesOut ?? 0 },
