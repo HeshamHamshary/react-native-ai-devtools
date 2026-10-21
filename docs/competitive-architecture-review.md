@@ -134,7 +134,7 @@ No benchmarks were invented. Where nobody has published a number, this document 
 | Console logs | In-app ring buffer (console, global errors, LogBox), chained, redacted | CDP + native logs [code] | Native logs; JS console via external package [code] | None [code] |
 | Network inspection | In-app XHR (and therefore fetch) interception from app start, redacted, bodies opt-in | CDP or injected patch; SDK for startup [code] | Native-log scraping [code] | None [code] |
 | Claude Code integration | Claude Agent SDK for the in-app chat, plus an MCP endpoint for an existing Claude Code session | MCP stdio, multi-client [code] | MCP stdio + CLI + skills [code] | MCP that delegates to the in-app Gemini loop [code] |
-| Interaction latency | Measured in [§9](#9-status-after-the-first-implementation-session) | Unknown end to end. Snapshot ≥ ~400 ms by design (fixed sleep) [code] | Android tap p50 52 ms; iOS press ~816 ms [evidence] | Unknown |
+| Interaction latency | Measured (iOS sim): UI snapshot p50 2 ms on device, screenshot 61 ms, type 30–180 ms, tap→navigate 0.2–0.8 s incl. settle ([STATUS](STATUS.md#measured-performance-debug-builds-device-time-excludes-the-model)) | Unknown end to end. Snapshot ≥ ~400 ms by design (fixed sleep) [code] | Android tap p50 52 ms; iOS press ~816 ms [evidence] | Unknown |
 | In-app chat | Yes, floating draggable assistant | No | No | Yes (draggable chat bar) [code] |
 | Integration complexity | One wrapper component + autolinked native module + `npx` server | Zero app code; host tools required | Zero app code; Xcode runner build / helper APK | One wrapper; LLM key or proxy |
 | License | MIT (placeholder pending owner's choice) | MIT core + proprietary `src/pro` | MIT | MIT snapshot; proprietary upstream |
