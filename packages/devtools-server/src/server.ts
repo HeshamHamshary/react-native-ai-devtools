@@ -3,7 +3,10 @@ import { randomUUID } from 'node:crypto';
 import { WebSocketServer, type WebSocket } from 'ws';
 import type { ClientMessage, ServerInfo } from 'react-native-agent-devtools-protocol';
 import { MAX_MESSAGE_BYTES, encode, isRpcMethod, parseClientMessage, redactText } from 'react-native-agent-devtools-protocol';
-import { AgentSession, agentAvailability } from './agent/AgentSession.ts';
+import { execFile } from 'node:child_process';
+import { AgentSession, agentAvailability, validateApiKey, verifyAgentAuth } from './agent/AgentSession.ts';
+import { CredentialStore, resolveApiKey } from './security/credentials.ts';
+import { setupPageHtml } from './transport/setupPage.ts';
 import { DemoSession } from './agent/DemoSession.ts';
 import { Pairing, checkRequestOrigin, isLoopback } from './security/auth.ts';
 import { RepoAccess } from './security/repoAccess.ts';
@@ -27,6 +30,14 @@ export interface ServerOptions {
   log: (line: string) => void;
   /** Scripted, clearly-labelled replies for UI development without credentials. */
   demoAgent?: boolean;
+  /** Where the pasted API key is stored (defaults to ~/.config/react-native-agent-devtools). */
+  credentials?: CredentialStore;
+  /** For tests: replace the credential-source check (spawns the Claude Code subprocess). */
+  verifyAuth?: (apiKey?: string) => Promise<{ ok: boolean; source: string; reason?: string }>;
+  /** For tests: replace agent session creation. */
+  sessionFactory?: (device: DeviceSession) => AgentSession | DemoSession | undefined;
+  /** For tests: skip the live key validation call. */
+  validateKey?: (key: string) => Promise<{ ok: boolean; reason?: string }>;
   /** For tests: override credential detection. */
   agentAvailable?: { available: boolean; reason?: string };
 }
@@ -35,6 +46,7 @@ export interface RunningServer {
   port: number;
   devices: DeviceRegistry;
   pairing: Pairing;
+  agent: () => { available: boolean; reason?: string; source?: string };
   close(): Promise<void>;
 }
 
@@ -68,12 +80,23 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
   const devices = new DeviceRegistry();
   const pairing = new Pairing();
   const repo = new RepoAccess(opts.repoRoots);
-  const availability = opts.demoAgent
-    ? { available: true }
-    : (opts.agentAvailable ?? (opts.agent ? agentAvailability() : { available: false, reason: 'agent disabled (--no-agent)' }));
+  const store = opts.credentials ?? new CredentialStore();
+  const computeAvailability = async (): Promise<{ available: boolean; reason?: string; source?: string }> => {
+    if (opts.demoAgent) return { available: true, source: 'demo agent (scripted, no model)' };
+    if (opts.agentAvailable) return opts.agentAvailable;
+    if (!opts.agent) return { available: false, reason: 'agent disabled (--no-agent)' };
+    const key = resolveApiKey(store);
+    const base = agentAvailability(key.key ? { ...process.env, ANTHROPIC_API_KEY: key.key } : process.env);
+    if (!base.available) return base;
+    // Local control request only; no prompt is sent and no model is called.
+    const v = await (opts.verifyAuth ?? verifyAgentAuth)(key.key);
+    return v.ok ? { available: true, source: key.source === 'stored' ? `${v.source} (saved key)` : v.source } : { available: false, reason: v.reason };
+  };
+  let availability = await computeAvailability();
   const sessions = new Map<string, AgentSession | DemoSession>();
   const approvals = new Map<string, (ok: boolean) => void>();
   const mcp = opts.mcp ? createMcpHandler(devices, SERVER_VERSION) : undefined;
+  let port = opts.port;
 
   const approve = (device: DeviceSession, title: string, detail: string): Promise<boolean> =>
     new Promise((resolve) => {
@@ -91,7 +114,12 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
 
   const serverInfo = (session?: AgentSession | DemoSession): ServerInfo => ({
     version: SERVER_VERSION,
-    agent: { available: availability.available, ...(availability.reason ? { reason: availability.reason } : {}), ...(session?.modelName ?? opts.model ? { model: session?.modelName ?? opts.model } : {}) },
+    agent: {
+      available: availability.available,
+      ...(availability.reason ? { reason: availability.reason } : {}),
+      ...(session?.modelName ?? opts.model ? { model: session?.modelName ?? opts.model } : {}),
+      setup: !opts.demoAgent && opts.agent,
+    },
     repoAccess: repo.enabled ? (opts.allowEdits ? 'read-write' : 'read') : 'none',
     network: opts.lan ? 'lan' : 'loopback',
   });
@@ -99,8 +127,10 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
   const newSession = (device: DeviceSession): AgentSession | DemoSession | undefined => {
     if (opts.demoAgent) return new DemoSession(device);
     if (!availability.available) return undefined;
+    if (opts.sessionFactory) return opts.sessionFactory(device);
     const s = new AgentSession(device, {
       model: opts.model,
+      apiKey: resolveApiKey(store).key,
       repo,
       allowEdits: opts.allowEdits,
       loadProjectSettings: opts.loadProjectSettings,
@@ -109,6 +139,26 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
     });
     s.start();
     return s;
+  };
+
+  /** Re-evaluate credentials and (re)start sessions on every connected device. */
+  const refreshAgent = async () => {
+    availability = await computeAvailability();
+    for (const d of devices.list()) {
+      sessions.get(d.id)?.close();
+      sessions.delete(d.id);
+      const s = newSession(d);
+      if (s) sessions.set(d.id, s);
+      d.send({ type: 'welcome', sessionId: d.id, server: serverInfo(s) });
+    }
+    log(`agent ${availability.available ? `ready (credentials: ${availability.source})` : `unavailable: ${availability.reason}`}`);
+  };
+
+  const openSetupPage = () => {
+    const url = `http://127.0.0.1:${port}/setup`;
+    const [cmd, args] =
+      process.platform === 'darwin' ? ['open', [url]] : process.platform === 'win32' ? ['cmd', ['/c', 'start', '', url]] : ['xdg-open', [url]];
+    execFile(cmd as string, args as string[], (err) => log(err ? `could not open a browser (${err.message}); visit ${url}` : `opened ${url}`));
   };
 
   // ---------------------------------------------------------------- HTTP
@@ -122,6 +172,38 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
     // Everything below controls the app: loopback only, even in LAN mode.
     if (!isLoopback(req.socket.remoteAddress)) return json(res, 403, { error: 'loopback only' });
     try {
+      if (url.pathname === '/setup' && req.method === 'GET') {
+        res.writeHead(200, {
+          'content-type': 'text/html; charset=utf-8',
+          'cache-control': 'no-store',
+          'content-security-policy': "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'",
+          'x-frame-options': 'DENY',
+        });
+        res.end(setupPageHtml({ configured: availability.available, source: availability.source ?? resolveApiKey(store).source, reason: availability.reason }));
+        return;
+      }
+      if (url.pathname === '/setup/key') {
+        // JSON-only: cross-site forms cannot send it without a CORS preflight we never grant.
+        if (!String(req.headers['content-type'] ?? '').startsWith('application/json')) return json(res, 415, { ok: false, error: 'JSON required' });
+        if (req.method === 'DELETE') {
+          store.clear();
+          await refreshAgent();
+          return json(res, 200, { ok: true });
+        }
+        if (req.method === 'POST') {
+          const body = JSON.parse(await readBody(req, 10_000)) as { key?: unknown };
+          const key = typeof body.key === 'string' ? body.key.trim() : '';
+          if (!/^sk-ant-[A-Za-z0-9_-]{20,}$/.test(key)) return json(res, 400, { ok: false, error: 'That does not look like an Anthropic API key (expected sk-ant-…).' });
+          const valid = await (opts.validateKey ?? validateApiKey)(key);
+          if (!valid.ok) return json(res, 400, { ok: false, error: valid.reason });
+          store.save(key);
+          await refreshAgent();
+          return availability.available
+            ? json(res, 200, { ok: true, source: availability.source })
+            : json(res, 400, { ok: false, error: availability.reason });
+        }
+        return json(res, 405, { ok: false, error: 'method not allowed' });
+      }
       if (url.pathname === '/mcp' && mcp) {
         const raw = req.method === 'POST' ? await readBody(req, 2_000_000) : '';
         await mcp(req, res, raw ? JSON.parse(raw) : undefined);
@@ -237,6 +319,10 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
           if (s) sessions.set(device.id, s);
           return;
         }
+        case 'setup.open':
+          if (opts.demoAgent || !opts.agent) return;
+          openSetupPage();
+          return;
         case 'approval.response':
           approvals.get(msg.id)?.(msg.approved);
           approvals.delete(msg.id);
@@ -265,12 +351,13 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
     http.listen(opts.port, opts.lan ? '0.0.0.0' : '127.0.0.1', () => resolve());
   });
   const address = http.address();
-  const port = typeof address === 'object' && address ? address.port : opts.port;
+  port = typeof address === 'object' && address ? address.port : opts.port;
 
   return {
     port,
     devices,
     pairing,
+    agent: () => availability,
     close: async () => {
       sessions.forEach((s) => s.close());
       wss.clients.forEach((c) => c.terminate());

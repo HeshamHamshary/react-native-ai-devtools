@@ -52,7 +52,7 @@ export interface TurnStats {
 
 export interface ServerInfo {
   version: string;
-  agent: { available: boolean; reason?: string; model?: string };
+  agent: { available: boolean; reason?: string; model?: string; /** The server can open a local key setup page. */ setup?: boolean };
   repoAccess: 'none' | 'read' | 'read-write';
   network: 'loopback' | 'lan';
 }
@@ -73,6 +73,8 @@ export type ClientMessage =
   | { type: 'rpc.result'; id: string; ok: true; result: unknown; deviceMs?: number }
   | { type: 'rpc.result'; id: string; ok: false; error: ToolError; deviceMs?: number }
   | { type: 'approval.response'; id: string; approved: boolean }
+  /** Ask the server to open its local credential setup page in the computer's browser. */
+  | { type: 'setup.open' }
   | { type: 'ping'; ts: number };
 
 // ---- server -> device ----------------------------------------------------
@@ -159,6 +161,7 @@ export function parseClientMessage(raw: unknown): Parsed<ClientMessage> {
       return { ok: true, msg: { type: 'chat.send', id: m.id, text: m.text } };
     case 'chat.cancel':
     case 'chat.reset':
+    case 'setup.open':
       return { ok: true, msg: { type: m.type } };
     case 'rpc.result': {
       if (!isStr(m.id, 64)) return { ok: false, error: 'rpc.result: invalid id' };

@@ -183,10 +183,12 @@ export function ChatPanel({ runtime, palette: p, insets, collapsed, onExpand, on
           if (state.messages.length) scrollRef.current?.scrollToEnd({ animated: true });
         }}
       >
+        {state.server?.agent.available === false ? (
+          <ConnectClaude p={p} serverUrl={state.serverUrl} canSetup={state.server.agent.setup === true} onSetup={() => runtime.openSetup()} />
+        ) : null}
         {state.messages.length === 0 ? (
           <View style={styles.empty}>
             <Text style={[styles.emptyTitle, { color: p.text }]}>Ask about this screen, or tell the agent what to do.</Text>
-            {state.server?.agent.available === false ? <ConnectClaude p={p} serverUrl={state.serverUrl} /> : null}
             <View style={[styles.chips, state.server?.agent.available === false ? styles.hidden : null]}>
               {SUGGESTIONS.map((s) => (
                 <Pressable key={s} onPress={() => runtime.sendChat(s)} disabled={state.connection !== 'connected'} style={[styles.chip, { borderColor: p.border }]}>
@@ -277,12 +279,30 @@ export function ChatPanel({ runtime, palette: p, insets, collapsed, onExpand, on
  * Shown when the server has no model credentials. There is no supported way for
  * a third-party tool to offer claude.ai login, so explain the two supported paths.
  */
-function ConnectClaude({ p, serverUrl }: { p: Palette; serverUrl: string }) {
+function ConnectClaude({ p, serverUrl, canSetup, onSetup }: { p: Palette; serverUrl: string; canSetup: boolean; onSetup: () => boolean }) {
+  const [opened, setOpened] = useState(false);
   const port = /:(\d+)/.exec(serverUrl.replace(/^ws:\/\//, ''))?.[1] ?? '8765';
   const command = `claude mcp add --transport http rn-agent http://127.0.0.1:${port}/mcp`;
   return (
     <View style={[styles.connect, { borderColor: p.border, backgroundColor: p.surface }]}>
       <Text style={[styles.connectTitle, { color: p.text }]}>Connect Claude</Text>
+      {canSetup ? (
+        <>
+          <Pressable
+            accessibilityRole="button"
+            onPress={() => setOpened(onSetup())}
+            style={({ pressed }) => [styles.setupBtn, { backgroundColor: p.accent, opacity: pressed ? 0.85 : 1 }]}
+          >
+            <Text style={[styles.setupBtnText, { color: p.accentText }]}>Set up Claude</Text>
+          </Pressable>
+          <Text style={[styles.connectStep, { color: opened ? p.ok : p.muted }]}>
+            {opened
+              ? 'A setup page opened on your computer. Sign in to the Anthropic Console, create an API key and paste it there; this chat activates automatically.'
+              : 'Opens a page on your computer: sign in to the Anthropic Console, create an API key and paste it. The key stays on your computer.'}
+          </Text>
+          <View style={[styles.divider, { backgroundColor: p.border }]} />
+        </>
+      ) : null}
       <Text style={[styles.connectStep, { color: p.text }]}>
         <Text style={styles.bold}>Use your Claude Code login: </Text>
         run this once on your computer, then ask Claude Code (in the terminal) to inspect or drive this app.
@@ -294,8 +314,8 @@ function ConnectClaude({ p, serverUrl }: { p: Palette; serverUrl: string }) {
         <Text style={[styles.chipText, { color: p.text }]}>Share / copy command</Text>
       </Pressable>
       <Text style={[styles.connectStep, { color: p.text }]}>
-        <Text style={styles.bold}>Chat right here: </Text>
-        start the server with an Anthropic API key in its environment (ANTHROPIC_API_KEY, or Bedrock/Vertex credentials). Ask your workspace admin for a key. The key stays on your computer and is never sent to the app.
+        <Text style={styles.bold}>Or set it in the terminal: </Text>
+        start the server with ANTHROPIC_API_KEY (or Bedrock/Vertex credentials) in its environment. Organization accounts: use the key your admin provides.
       </Text>
     </View>
   );
@@ -413,6 +433,9 @@ const styles = StyleSheet.create({
   connect: { borderWidth: StyleSheet.hairlineWidth, borderRadius: 12, padding: 12, gap: 8 },
   connectTitle: { fontSize: 15, fontWeight: '700' },
   connectStep: { fontSize: 13.5, lineHeight: 19 },
+  setupBtn: { alignSelf: 'stretch', alignItems: 'center', borderRadius: 12, paddingVertical: 11 },
+  setupBtnText: { fontSize: 15, fontWeight: '700' },
+  divider: { height: StyleSheet.hairlineWidth, marginVertical: 4 },
   command: { fontFamily: Platform.select({ ios: 'Menlo', default: 'monospace' }), fontSize: 11.5, padding: 8, borderRadius: 8, borderWidth: StyleSheet.hairlineWidth },
   shareBtn: { alignSelf: 'flex-start', borderWidth: StyleSheet.hairlineWidth, borderRadius: 14, paddingHorizontal: 12, paddingVertical: 6 },
   perf: { marginHorizontal: 12, marginTop: 8, borderWidth: StyleSheet.hairlineWidth, borderRadius: 10, padding: 10, gap: 3 },

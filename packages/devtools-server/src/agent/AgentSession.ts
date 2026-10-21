@@ -26,6 +26,8 @@ export interface AgentConfig {
   allowEdits: boolean;
   loadProjectSettings: boolean;
   log: (msg: string) => void;
+  /** API key from the server environment or the local credential store. */
+  apiKey?: string;
   /** Ask the developer on the device (used for repository edits). */
   approve: (device: DeviceSession, title: string, detail: string) => Promise<boolean>;
 }
@@ -64,18 +66,37 @@ export function authDecision(info: AccountInfo | undefined): { ok: boolean; sour
 
 /** Isolated Claude Code config dir so the subprocess never inherits a personal login, settings or plugins. */
 let isolatedConfigDir: string | undefined;
-function agentEnv(): Record<string, string> {
+function agentEnv(apiKey?: string): Record<string, string> {
   isolatedConfigDir ??= mkdtempSync(join(tmpdir(), 'rnad-claude-config-'));
   const env: Record<string, string> = {};
   for (const [k, v] of Object.entries(process.env)) if (typeof v === 'string') env[k] = v;
+  if (apiKey && !env.ANTHROPIC_API_KEY) env.ANTHROPIC_API_KEY = apiKey;
   env.CLAUDE_CONFIG_DIR = isolatedConfigDir;
   return env;
 }
 
+/**
+ * Validate an API key against Anthropic's model list endpoint (free, no tokens).
+ * Used only for a key the developer just pasted into the local setup page.
+ */
+export async function validateApiKey(key: string): Promise<{ ok: boolean; reason?: string }> {
+  try {
+    const res = await fetch('https://api.anthropic.com/v1/models?limit=1', {
+      headers: { 'x-api-key': key, 'anthropic-version': '2023-06-01' },
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (res.ok) return { ok: true };
+    if (res.status === 401 || res.status === 403) return { ok: false, reason: 'Anthropic rejected this key (invalid, revoked or without API access).' };
+    return { ok: false, reason: `Could not validate the key (HTTP ${res.status}). Try again in a moment.` };
+  } catch (e) {
+    return { ok: false, reason: `Could not reach api.anthropic.com to validate the key: ${(e as Error).message}` };
+  }
+}
+
 /** Check credentials without sending any prompt (no model call). */
-export async function verifyAgentAuth(timeoutMs = 20_000): Promise<{ ok: boolean; source: string; reason?: string }> {
+export async function verifyAgentAuth(apiKey?: string, timeoutMs = 20_000): Promise<{ ok: boolean; source: string; reason?: string }> {
   const idle = new AsyncQueue<SDKUserMessage>();
-  const q = query({ prompt: idle, options: { env: agentEnv(), tools: [], settingSources: [], persistSession: false } });
+  const q = query({ prompt: idle, options: { env: agentEnv(apiKey), tools: [], settingSources: [], persistSession: false } });
   try {
     const info = await Promise.race([
       q.accountInfo(),
@@ -220,7 +241,7 @@ export class AgentSession {
         includePartialMessages: true,
         persistSession: false,
         stderr: (data: string) => this.cfg.log(`[agent stderr] ${redactText(data.trim()).slice(0, 500)}`),
-        env: agentEnv(),
+        env: agentEnv(this.cfg.apiKey),
       },
     });
     const q = this.q;

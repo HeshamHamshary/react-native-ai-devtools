@@ -218,6 +218,13 @@ export class Runtime {
     this.store.set({ connection: 'idle', connectionDetail: 'disconnected by user', chat: 'idle' });
   }
 
+  /** Ask the server to open its local API-key setup page in the computer's browser. */
+  openSetup(): boolean {
+    if (!this.conn?.isOpen) return false;
+    this.send({ type: 'setup.open' });
+    return true;
+  }
+
   submitPairingCode(code: string): void {
     this.pairingCode = code.trim().toUpperCase();
     this.conn?.reconnect();
