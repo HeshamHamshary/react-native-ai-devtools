@@ -136,7 +136,7 @@ export function capabilities(): CapabilityMap {
         : { supported: true, mode: 'semantic', note: nativeNote },
     longPress: ios ? { supported: true, mode: 'semantic' } : { supported: n, mode: 'synthesized-touch', note: nativeNote },
     swipe: ios
-      ? { supported: false, note: 'requires an OS-level backend on iOS' }
+      ? { supported: false, note: 'no in-process swipe on iOS; the server uses OS-level input (Maestro/XCUITest on the simulator) when available' }
       : { supported: n, mode: 'synthesized-touch', note: nativeNote },
     typeText: n ? { supported: true, mode: 'native' } : { supported: true, mode: 'semantic', note: nativeNote },
     scroll: { supported: n, mode: 'native', note: nativeNote },
@@ -144,7 +144,9 @@ export function capabilities(): CapabilityMap {
       ? { supported: true, mode: 'semantic', note: 'navigation.goBack() via the React Navigation adapter' }
       : { supported: n, mode: 'native', note: n ? 'OnBackPressedDispatcher' : nativeNote },
     screenshot: { supported: n, note: n ? (ios ? 'UIKit drawHierarchy' : 'PixelCopy') : nativeNote },
-    nativeAlerts: { supported: n, note: 'read-only' },
+    nativeAlerts: ios
+      ? { supported: true, mode: 'semantic', note: 'Alert.alert buttons: dismiss + callback; real taps need OS-level input' }
+      : { supported: n, mode: 'native', note: n ? 'dialog button performClick' : nativeNote },
     logs: { supported: true },
     network: { supported: true, note: 'XMLHttpRequest/fetch only; native-originated requests are not captured' },
   };

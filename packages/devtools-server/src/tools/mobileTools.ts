@@ -481,13 +481,16 @@ export const MOBILE_TOOLS: MobileTool[] = [
   {
     name: 'mobile_get_device',
     kind: 'read',
-    description: 'Device/app info, the interaction capabilities of this platform (which actions are real touches vs semantic), and device-side performance stats.',
+    description:
+      'Device/app info, the interaction capabilities of this platform (which actions are real touches vs semantic), whether OS-level input (mode "os") is available and why not, and device-side performance stats.',
     shape: {},
     summary: () => 'Read device info',
     run: (_a, ctx) =>
       guarded(async () => {
         const perf = await call(ctx, 'getPerf', {});
-        return text(JSON.stringify({ device: ctx.device?.info, capabilities: ctx.device?.capabilities, perf }, null, 1));
+        const os = ctx.os && ctx.device ? await ctx.os.automation.for(ctx.device.id, ctx.device.info) : undefined;
+        const osInput = os?.input ? { available: true, backend: os.input.name, default: ctx.os?.prefer === true } : { available: false, reason: os?.reason ?? 'not configured' };
+        return text(JSON.stringify({ device: ctx.device?.info, capabilities: ctx.device?.capabilities, osInput, perf }, null, 1));
       }),
   },
 ];
