@@ -72,6 +72,7 @@ function errCode(e: unknown): ErrorCode {
   if (code === 'RNAD_UNSUPPORTED' || code === 'UNSUPPORTED') return 'UNSUPPORTED';
   if (code === 'RNAD_NOT_FOUND') return 'NOT_FOUND';
   if (code === 'RNAD_DISABLED') return 'DISABLED';
+  if (code === 'RNAD_NOT_HITTABLE') return 'NOT_HITTABLE';
   if (code.startsWith('RNAD_')) return 'NATIVE_ERROR';
   return 'INTERNAL';
 }

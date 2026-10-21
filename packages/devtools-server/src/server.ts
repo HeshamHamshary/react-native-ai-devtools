@@ -127,7 +127,7 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
       if (url.pathname === '/api/rpc' && req.method === 'POST') {
         const body = JSON.parse(await readBody(req)) as { method?: unknown; params?: Record<string, unknown>; device?: string; timeoutMs?: number };
         if (!isRpcMethod(body.method)) return json(res, 400, { error: `unknown method ${String(body.method)}` });
-        const device = body.device ? devices.get(body.device) : devices.active();
+        const device = devices.find(body.device);
         if (!device) return json(res, 409, { error: 'no device connected' });
         try {
           const r = await device.rpc(body.method, body.params ?? {}, Math.min(body.timeoutMs ?? 30_000, 90_000));

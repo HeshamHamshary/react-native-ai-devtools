@@ -140,4 +140,14 @@ export class DeviceRegistry extends EventEmitter {
   get(id: string): DeviceSession | undefined {
     return this.devices.get(id);
   }
+
+  /** Select by id, or by platform ('ios' | 'android': most recent of that platform). */
+  find(selector: string | undefined): DeviceSession | undefined {
+    if (!selector) return this.active();
+    const byId = this.devices.get(selector);
+    if (byId) return byId;
+    return this.list()
+      .filter((d) => d.info.platform === selector)
+      .pop();
+  }
 }

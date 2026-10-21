@@ -19,7 +19,7 @@ const HELP = `react-native-agent-devtools-server ${SERVER_VERSION}
 
 Usage:
   react-native-agent-devtools-server [start] [options]   Run the bridge (default)
-  react-native-agent-devtools-server call <method> [json-params] [--port N]
+  react-native-agent-devtools-server call <method> [json-params] [--device ios|android|<id>]
                                                          Invoke a device RPC on the connected app
   react-native-agent-devtools-server bench [--iterations N] [--port N]
                                                          Measure device-side latency (no model)
@@ -48,11 +48,13 @@ function lanAddresses(): string[] {
     .map((i) => i.address);
 }
 
+let deviceSelector: string | undefined;
+
 async function rpc(port: number, method: string, params: unknown): Promise<{ ok: boolean; result?: unknown; deviceMs?: number; rttMs?: number; error?: { code: string; message: string } }> {
   const res = await fetch(`http://127.0.0.1:${port}/api/rpc`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ method, params }),
+    body: JSON.stringify({ method, params, timeoutMs: 90_000, ...(deviceSelector ? { device: deviceSelector } : {}) }),
   });
   if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
   return (await res.json()) as never;
@@ -74,6 +76,7 @@ async function main() {
       'no-mcp': { type: 'boolean', default: false },
       'load-project-settings': { type: 'boolean', default: false },
       iterations: { type: 'string', default: '20' },
+      device: { type: 'string' },
       help: { type: 'boolean', short: 'h', default: false },
     },
   });
@@ -82,6 +85,7 @@ async function main() {
     return;
   }
   const port = Number(values.port);
+  deviceSelector = values.device;
 
   if (command === 'call') {
     const [method, raw] = positionals;

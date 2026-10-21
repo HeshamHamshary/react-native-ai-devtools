@@ -131,14 +131,16 @@ class RNAgentDevToolsModule(reactContext: ReactApplicationContext) :
     return null
   }
 
-  private inline fun <reified T : View> findDescendant(v: View, depth: Int = 5): T? {
-    if (v is T) return v
+  private fun <T : View> descendantOf(v: View, cls: Class<T>, depth: Int): T? {
+    if (cls.isInstance(v)) return cls.cast(v)
     if (depth == 0 || v !is ViewGroup) return null
     for (i in 0 until v.childCount) {
-      findDescendant<T>(v.getChildAt(i), depth - 1)?.let { return it }
+      descendantOf(v.getChildAt(i), cls, depth - 1)?.let { return it }
     }
     return null
   }
+
+  private inline fun <reified T : View> findDescendant(v: View): T? = descendantOf(v, T::class.java, 5)
 
   private fun windowPoint(v: View, dx: Double, dy: Double): Pair<Float, Float> {
     val loc = IntArray(2)
@@ -253,6 +255,20 @@ class RNAgentDevToolsModule(reactContext: ReactApplicationContext) :
     }
     val root = v.rootView
     val (x, y) = windowPoint(v, dx, dy)
+    // Re-check at dispatch time: layout may have moved since JS hit-tested (keyboard,
+    // animations). Never deliver a touch that a finger would land on something else.
+    val reactRoot = reactRootOf(v)
+    if (reactRoot != null) {
+      val rootLoc = IntArray(2)
+      reactRoot.getLocationInWindow(rootLoc)
+      val targetTag = TouchTargetHelper.findTargetTagForTouch(x - rootLoc[0], y - rootLoc[1], reactRoot)
+      var hit: View? = resolveView(targetTag)
+      while (hit != null && hit !== v) hit = hit.parent as? View
+      if (hit == null || !reactRoot.hasWindowFocus()) {
+        promise.reject("RNAD_NOT_HITTABLE", "A touch at the element's center would land on view #$targetTag, not on #$tag")
+        return@onUi
+      }
+    }
     val downTime = SystemClock.uptimeMillis()
     val handled = dispatch(root, obtain(downTime, MotionEvent.ACTION_DOWN, x, y))
     main.postDelayed({

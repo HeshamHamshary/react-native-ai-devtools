@@ -419,7 +419,8 @@ export class Inspector {
         const switchLabel = a11yLabel ?? nearbyLabel(rect);
         addElement(f, next, hash, SWITCH_TYPES.has(type) ? 'switch' : 'slider', rect, {
           ...(switchLabel ? { label: switchLabel } : {}),
-          value: SWITCH_TYPES.has(type) ? props.value === true : props.value,
+          // iOS RCTSwitch uses `value`, Android's AndroidSwitch uses `on`.
+          value: SWITCH_TYPES.has(type) ? (props.value ?? props.on) === true : props.value,
           enabled: props.disabled !== true && props.enabled !== false && !state.disabled,
           actions: ['tap'],
           pressHandler: (ownerProp(owners, 'onValueChange') as any) ?? undefined,
@@ -650,7 +651,7 @@ export class Inspector {
   private coveringHost(el: InternalElement, hitTag: number, hostByTag: Map<number, Fiber>, overlayTags: Set<number>): string | null {
     if (hitTag === el.tag) return null;
     if (overlayTags.has(hitTag)) return 'the devtools overlay';
-    if (hitTag === 0) return 'a non-React view or another window (keyboard, dialog, system UI)';
+    if (hitTag === 0) return 'another window or non-React view (dialog, LogBox error screen, keyboard or system UI)';
     const hitFiber = hostByTag.get(hitTag) ?? this.findHostOutsideApp(hitTag);
     if (!hitFiber) return `view #${hitTag} outside the inspected app tree`;
     if (!hostByTag.has(hitTag)) {

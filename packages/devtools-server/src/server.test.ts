@@ -61,8 +61,11 @@ class FakeDevice {
     }
     return new Promise((resolve, reject) => {
       const t = setTimeout(() => reject(new Error(`timed out waiting for ${type}`)), timeoutMs);
-      const w = (m: ServerMessage) => {
-        if (m.type !== type) return this.waiters.push(w);
+      const w = (m: ServerMessage): void => {
+        if (m.type !== type) {
+          this.waiters.push(w);
+          return;
+        }
         clearTimeout(t);
         this.inbox.splice(this.inbox.indexOf(m), 1);
         resolve(m as Extract<ServerMessage, { type: T }>);
