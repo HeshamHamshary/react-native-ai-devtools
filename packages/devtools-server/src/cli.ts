@@ -34,6 +34,7 @@ Options:
   --no-agent             Disable the in-app chat agent (MCP and RPC still work)
   --no-mcp               Disable the /mcp endpoint for Claude Code
   --load-project-settings  Load CLAUDE.md / .claude settings from the repo
+  --demo-agent           Scripted replies (labelled, no model) for UI development
   -h, --help
 
 The in-app chat uses the Claude Agent SDK and needs ANTHROPIC_API_KEY (or Bedrock/Vertex
@@ -75,6 +76,7 @@ async function main() {
       'no-agent': { type: 'boolean', default: false },
       'no-mcp': { type: 'boolean', default: false },
       'load-project-settings': { type: 'boolean', default: false },
+      'demo-agent': { type: 'boolean', default: false },
       iterations: { type: 'string', default: '20' },
       device: { type: 'string' },
       help: { type: 'boolean', short: 'h', default: false },
@@ -151,13 +153,15 @@ async function main() {
     agent: !values['no-agent'],
     mcp: !values['no-mcp'],
     loadProjectSettings: values['load-project-settings'] === true,
+    demoAgent: values['demo-agent'] === true,
     log,
   });
 
   let avail: { available: boolean; reason?: string; source?: string } = values['no-agent']
     ? { available: false, reason: 'disabled with --no-agent' }
     : agentAvailability();
-  if (avail.available) {
+  if (values['demo-agent']) avail = { available: true, source: 'none — scripted demo agent, no model' };
+  else if (avail.available) {
     // Local control request only; no prompt is sent and no model is called.
     const v = await verifyAgentAuth();
     avail = v.ok ? { available: true, source: v.source } : { available: false, reason: v.reason };

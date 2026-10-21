@@ -4,6 +4,7 @@ import { WebSocketServer, type WebSocket } from 'ws';
 import type { ClientMessage, ServerInfo } from 'react-native-agent-devtools-protocol';
 import { MAX_MESSAGE_BYTES, encode, isRpcMethod, parseClientMessage, redactText } from 'react-native-agent-devtools-protocol';
 import { AgentSession, agentAvailability } from './agent/AgentSession.ts';
+import { DemoSession } from './agent/DemoSession.ts';
 import { Pairing, checkRequestOrigin, isLoopback } from './security/auth.ts';
 import { RepoAccess } from './security/repoAccess.ts';
 import { DeviceRegistry, DeviceSession, RpcError } from './transport/devices.ts';
@@ -24,6 +25,8 @@ export interface ServerOptions {
   mcp: boolean;
   loadProjectSettings: boolean;
   log: (line: string) => void;
+  /** Scripted, clearly-labelled replies for UI development without credentials. */
+  demoAgent?: boolean;
   /** For tests: override credential detection. */
   agentAvailable?: { available: boolean; reason?: string };
 }
@@ -65,8 +68,10 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
   const devices = new DeviceRegistry();
   const pairing = new Pairing();
   const repo = new RepoAccess(opts.repoRoots);
-  const availability = opts.agentAvailable ?? (opts.agent ? agentAvailability() : { available: false, reason: 'agent disabled (--no-agent)' });
-  const sessions = new Map<string, AgentSession>();
+  const availability = opts.demoAgent
+    ? { available: true }
+    : (opts.agentAvailable ?? (opts.agent ? agentAvailability() : { available: false, reason: 'agent disabled (--no-agent)' }));
+  const sessions = new Map<string, AgentSession | DemoSession>();
   const approvals = new Map<string, (ok: boolean) => void>();
   const mcp = opts.mcp ? createMcpHandler(devices, SERVER_VERSION) : undefined;
 
@@ -84,14 +89,15 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
       device.send({ type: 'approval.request', id, title, detail, risk: 'high' });
     });
 
-  const serverInfo = (session?: AgentSession): ServerInfo => ({
+  const serverInfo = (session?: AgentSession | DemoSession): ServerInfo => ({
     version: SERVER_VERSION,
     agent: { available: availability.available, ...(availability.reason ? { reason: availability.reason } : {}), ...(session?.modelName ?? opts.model ? { model: session?.modelName ?? opts.model } : {}) },
     repoAccess: repo.enabled ? (opts.allowEdits ? 'read-write' : 'read') : 'none',
     network: opts.lan ? 'lan' : 'loopback',
   });
 
-  const newSession = (device: DeviceSession): AgentSession | undefined => {
+  const newSession = (device: DeviceSession): AgentSession | DemoSession | undefined => {
+    if (opts.demoAgent) return new DemoSession(device);
     if (!availability.available) return undefined;
     const s = new AgentSession(device, {
       model: opts.model,
