@@ -124,6 +124,21 @@ test('redactText removes tokens, card numbers, emails and key/value secrets', ()
   assert.ok(s.includes('order 123456'), 'non-sensitive numbers survive');
 });
 
+test('redactText removes well-known API key formats, even short test keys', () => {
+  const s = redactText('using sk-ant-api03-AbC123xyz and sk-ant-dummy-invalid-key, github ghp_0123456789abcdefghijABCDEFGHIJ, aws AKIAABCDEFGHIJKLMNOP');
+  for (const leaked of ['sk-ant-api03', 'sk-ant-dummy', 'ghp_0123', 'AKIAABCD']) assert.ok(!s.includes(leaked), leaked);
+  assert.ok(s.includes('using'));
+});
+
+test('chat.notice and welcome.trusted are validated', () => {
+  const n = parseServerMessage(JSON.stringify({ type: 'chat.notice', text: 'Approve in your terminal', level: 'bogus', extra: 1 }));
+  assert.ok(n.ok);
+  assert.deepEqual(n.ok && n.msg, { type: 'chat.notice', text: 'Approve in your terminal', level: 'info' });
+  assert.equal(parseServerMessage(JSON.stringify({ type: 'chat.notice', text: '' })).ok, false);
+  const w = parseServerMessage(JSON.stringify({ type: 'welcome', sessionId: 's', trusted: true, server: { version: '1', agent: { available: false }, repoAccess: 'none', network: 'loopback' } }));
+  assert.ok(w.ok && w.msg.type === 'welcome' && w.msg.trusted === true);
+});
+
 test('redactUrl strips userinfo, secrets in query, emails in path and fragments', () => {
   const u = redactUrl('https://bob:pw@api.example.com/users/jane%40example.com/orders?page=2&access_token=abc123&q=shoes#id_token=xyz');
   assert.equal(u, 'https://api.example.com/users/<email>/orders?page=2&access_token=[REDACTED]&q=shoes#…');

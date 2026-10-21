@@ -41,13 +41,16 @@ export class DeviceSession extends EventEmitter {
   readonly info: DeviceInfo;
   readonly capabilities: CapabilityMap;
   readonly remote: boolean;
+  /** Paired with a code from the server terminal: may approve edits and Claude Code permissions. */
+  readonly trusted: boolean;
 
-  constructor(ws: WebSocket, info: DeviceInfo, capabilities: CapabilityMap, remote: boolean) {
+  constructor(ws: WebSocket, info: DeviceInfo, capabilities: CapabilityMap, remote: boolean, trusted = false) {
     super();
     this.ws = ws;
     this.info = info;
     this.capabilities = capabilities;
     this.remote = remote;
+    this.trusted = trusted;
   }
 
   get label(): string {

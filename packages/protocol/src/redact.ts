@@ -20,6 +20,8 @@ const EMAIL_ONE = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i;
 const JWT = /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g;
 const BEARER = /\b(Bearer|Basic|Token)\s+[A-Za-z0-9._~+/=-]{8,}/gi;
 const CARD = /\b(?:\d[ -]?){13,19}\b/g;
+/** Well-known credential formats, caught even when short (test keys, truncated output). */
+const KNOWN_KEY = /\b(sk-ant-[A-Za-z0-9_-]{6,}|sk-[A-Za-z0-9_-]{20,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|xox[abprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{30,})/g;
 const LONG_SECRET = /\b(?=[A-Za-z0-9_-]*\d)(?=[A-Za-z0-9_-]*[A-Za-z])[A-Za-z0-9_-]{32,}\b/g;
 const KEY_VALUE = new RegExp(
   `(["']?)(${SENSITIVE_KEY.source})\\1(\\s*[:=]\\s*)("[^"]*"|'[^']*'|[^\\s,;&}]+)`,
@@ -50,6 +52,7 @@ export interface RedactOptions {
 export function redactText(input: string, opts: RedactOptions = {}): string {
   let s = input;
   s = s.replace(JWT, '<jwt>');
+  s = s.replace(KNOWN_KEY, '<secret>');
   s = s.replace(BEARER, (_m, scheme: string) => `${scheme} ${REDACTED}`);
   s = s.replace(KEY_VALUE, (_m, q: string, key: string, _inner: unknown, sep: string) => `${q}${key}${q}${sep}${REDACTED}`);
   s = s.replace(CARD, (m) => {

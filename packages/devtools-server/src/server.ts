@@ -1,14 +1,18 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
-import { randomUUID } from 'node:crypto';
+import { join } from 'node:path';
 import { WebSocketServer, type WebSocket } from 'ws';
 import type { ClientMessage, ServerInfo } from 'react-native-agent-devtools-protocol';
 import { MAX_MESSAGE_BYTES, encode, isRpcMethod, parseClientMessage, redactText } from 'react-native-agent-devtools-protocol';
-import { claudeCodeSignIn, hasEnvCredentials, type SignInBackend, type SignInHandle } from './agent/account.ts';
+import { claudeCodeSignIn, type SignInBackend, type SignInHandle } from './agent/account.ts';
 import { AgentSession, verifyAgentAuth } from './agent/AgentSession.ts';
-import { ChannelChat, ChannelHub } from './channel/hub.ts';
+import { chooseAuthMode, stateDir as defaultStateDir, type AuthMode } from './agent/credentials.ts';
 import { DemoSession } from './agent/DemoSession.ts';
+import { loadProjectInstructions } from './agent/prompt.ts';
+import { ChannelChat, ChannelHub } from './channel/hub.ts';
+import { Approvals } from './security/approvals.ts';
 import { Pairing, checkRequestOrigin, isLoopback } from './security/auth.ts';
 import { RepoAccess } from './security/repoAccess.ts';
+import { bearerOk, loadServerToken } from './security/serverToken.ts';
 import { DeviceRegistry, DeviceSession, RpcError } from './transport/devices.ts';
 import { createMcpHandler } from './transport/mcpEndpoint.ts';
 
@@ -23,33 +27,49 @@ export interface ServerOptions {
   model?: string;
   /** Run the in-app chat agent (requires model credentials). */
   agent: boolean;
+  /**
+   * Credentials for the in-app agent (`--auth`). Without it the only candidate is a
+   * Console sign-in completed for this tool; ambient credentials are never adopted.
+   */
+  auth?: string;
   /** Expose /mcp for Claude Code. */
   mcp: boolean;
-  loadProjectSettings: boolean;
+  /** Add the repo's CLAUDE.md text to the agent's instructions. */
+  projectInstructions?: boolean;
+  /** Require pairing for every device, including simulators on this computer. */
+  requirePairing?: boolean;
+  /** Where the server token and pairings are kept (default ~/.config/react-native-agent-devtools). */
+  stateDir?: string;
   log: (line: string) => void;
   /** Scripted, clearly-labelled replies for UI development without credentials. */
   demoAgent?: boolean;
   /** For tests: replace Anthropic sign-in (defaults to `claude auth login --console`). */
   signIn?: SignInBackend;
   /** For tests: replace the credential-source check (spawns the Claude Code subprocess). */
-  verifyAuth?: () => Promise<{ ok: boolean; source: string; reason?: string }>;
+  verifyAuth?: (mode: AuthMode) => Promise<{ ok: boolean; source: string; reason?: string }>;
   /** For tests: replace agent session creation. */
   sessionFactory?: (device: DeviceSession) => AgentSession | DemoSession | undefined;
   /** For tests: override credential detection. */
   agentAvailable?: { available: boolean; reason?: string };
+  /** For tests: the environment credentials are chosen from (default process.env). */
+  env?: NodeJS.ProcessEnv;
 }
 
 export interface RunningServer {
   port: number;
+  /** Bearer token local clients must present (CLI, Claude Code bridge, MCP over HTTP). */
+  token: string;
   devices: DeviceRegistry;
   pairing: Pairing;
   agent: () => Availability;
+  /** Credentials found in the environment that are deliberately not used. */
+  authNotices: string[];
   close(): Promise<void>;
 }
 
 const HELLO_TIMEOUT_MS = 5_000;
 
-type Availability = { available: boolean; reason?: string; source?: string; via?: 'claude-code' };
+type Availability = { available: boolean; reason?: string; source?: string; via?: 'claude-code'; mode?: AuthMode };
 type ChatSession = AgentSession | DemoSession | ChannelChat;
 
 function readBody(req: IncomingMessage, limit = 1_000_000): Promise<string> {
@@ -75,44 +95,42 @@ function json(res: ServerResponse, status: number, body: unknown): void {
   res.end(JSON.stringify(body));
 }
 
+const UNAUTHORIZED = 'missing or invalid Authorization: Bearer token (see `react-native-agent-devtools-server token`)';
+
 export async function startServer(opts: ServerOptions): Promise<RunningServer> {
   const log = opts.log;
+  const env = opts.env ?? process.env;
+  const dir = opts.stateDir ?? defaultStateDir();
+  const token = loadServerToken(dir);
   const devices = new DeviceRegistry();
-  const pairing = new Pairing();
+  const pairing = new Pairing({ storeFile: join(dir, 'paired-devices.json') });
   const repo = new RepoAccess(opts.repoRoots);
+  const instructions = opts.projectInstructions ? loadProjectInstructions(repo.roots) : undefined;
   const signIn = opts.signIn ?? claudeCodeSignIn;
   let pendingSignIn: SignInHandle | undefined;
   /** Set when the API rejects the credentials mid-session; cleared by a new sign-in. */
   let authRejected: string | undefined;
+  let authNotices: string[] = [];
   const computeAvailability = async (): Promise<Availability> => {
     if (opts.demoAgent) return { available: true, source: 'demo agent (scripted, no model)' };
     if (hub.chatAvailable) return { available: true, source: 'your Claude Code session (channel)', via: 'claude-code' };
     if (opts.agentAvailable) return opts.agentAvailable;
     if (!opts.agent) return { available: false, reason: 'agent disabled (--no-agent)' };
     if (authRejected) return { available: false, reason: `${authRejected} Tap "Set up Claude" to sign in again.` };
-    if (!hasEnvCredentials() && !(await signIn.status()).loggedIn) {
+    const signedIn = opts.auth === undefined || opts.auth === 'console' ? (await signIn.status()).loggedIn : false;
+    const choice = chooseAuthMode(opts.auth, env, signedIn);
+    authNotices = choice.notices;
+    if (choice.error) return { available: false, reason: choice.error, ...(choice.mode ? { mode: choice.mode } : {}) };
+    if (!choice.mode || (choice.mode === 'console' && !signedIn)) {
       return { available: false, reason: 'Not signed in. Tap "Set up Claude" to sign in with your Anthropic Console account.' };
     }
     // Local control request only; no prompt is sent and no model is called.
-    const v = await (opts.verifyAuth ?? verifyAgentAuth)();
-    return v.ok ? { available: true, source: v.source } : { available: false, reason: v.reason };
+    const v = await (opts.verifyAuth ?? verifyAgentAuth)(choice.mode);
+    return v.ok ? { available: true, source: v.source, mode: choice.mode } : { available: false, reason: v.reason, mode: choice.mode };
   };
-  const approvals = new Map<string, (ok: boolean) => void>();
-  /** Ask on the device; resolves undefined when nobody answers within two minutes. */
-  const ask = (device: DeviceSession, title: string, detail: string): Promise<boolean | undefined> =>
-    new Promise((resolve) => {
-      const id = randomUUID();
-      const timer = setTimeout(() => {
-        approvals.delete(id);
-        resolve(undefined);
-      }, 120_000);
-      approvals.set(id, (ok) => {
-        clearTimeout(timer);
-        resolve(ok);
-      });
-      device.send({ type: 'approval.request', id, title, detail, risk: 'high' });
-    });
-  const approve = async (device: DeviceSession, title: string, detail: string): Promise<boolean> => (await ask(device, title, detail)) === true;
+  const approvals = new Approvals();
+  const ask = approvals.ask.bind(approvals);
+  const approve = approvals.approve.bind(approvals);
   const hub = new ChannelHub({ devices, log, ask, onChange: () => void refreshAgent() });
 
   let availability = await computeAvailability();
@@ -122,6 +140,7 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
 
   const serverInfo = (session?: ChatSession): ServerInfo => {
     const model = availability.via ? undefined : (session?.modelName ?? opts.model);
+    const consoleSetup = availability.mode === undefined || availability.mode === 'console';
     return {
       version: SERVER_VERSION,
       agent: {
@@ -129,7 +148,8 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
         ...(availability.reason ? { reason: availability.reason } : {}),
         ...(model ? { model } : {}),
         ...(availability.via ? { via: availability.via } : {}),
-        setup: !opts.demoAgent && opts.agent,
+        ...(availability.available && availability.source ? { credentials: availability.source } : {}),
+        setup: !opts.demoAgent && opts.agent && consoleSetup,
       },
       repoAccess: repo.enabled ? (opts.allowEdits ? 'read-write' : 'read') : 'none',
       network: opts.lan ? 'lan' : 'loopback',
@@ -141,11 +161,13 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
     if (!availability.available) return undefined;
     if (availability.via === 'claude-code') return new ChannelChat(device, hub);
     if (opts.sessionFactory) return opts.sessionFactory(device);
+    if (!availability.mode) return undefined;
     const s = new AgentSession(device, {
+      auth: availability.mode,
       model: opts.model,
       repo,
       allowEdits: opts.allowEdits,
-      loadProjectSettings: opts.loadProjectSettings,
+      instructions,
       log,
       approve,
       onAuthError: (reason) => {
@@ -167,7 +189,7 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
       sessions.delete(d.id);
       const s = newSession(d);
       if (s) sessions.set(d.id, s);
-      d.send({ type: 'welcome', sessionId: d.id, server: serverInfo(s) });
+      d.send({ type: 'welcome', sessionId: d.id, trusted: d.trusted, server: serverInfo(s) });
     }
     log(`agent ${availability.available ? `ready (credentials: ${availability.source})` : `unavailable: ${availability.reason}`}`);
   };
@@ -200,11 +222,10 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
     const url = new URL(req.url ?? '/', 'http://localhost');
     const origin = checkRequestOrigin(req, opts.lan);
     if (!origin.ok) return json(res, 403, { error: origin.reason });
-    if (url.pathname === '/health') {
-      return json(res, 200, { ok: true, version: SERVER_VERSION, devices: devices.list().length, agent: availability.available });
-    }
-    // Everything below controls the app: loopback only, even in LAN mode.
+    if (url.pathname === '/health') return json(res, 200, { ok: true, version: SERVER_VERSION });
+    // Everything below controls the app: loopback only (even in LAN mode) and token-authenticated.
     if (!isLoopback(req.socket.remoteAddress)) return json(res, 403, { error: 'loopback only' });
+    if (!bearerOk(req, token)) return json(res, 401, { error: UNAUTHORIZED });
     try {
       if (url.pathname === '/mcp' && mcp) {
         const raw = req.method === 'POST' ? await readBody(req, 2_000_000) : '';
@@ -217,7 +238,19 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
         return json(res, 200, { ok: true });
       }
       if (url.pathname === '/api/devices' && req.method === 'GET') {
-        return json(res, 200, devices.list().map((d) => ({ id: d.id, label: d.label, info: d.info, remote: d.remote, stats: d.stats })));
+        return json(
+          res,
+          200,
+          devices.list().map((d) => ({ id: d.id, label: d.label, info: d.info, remote: d.remote, trusted: d.trusted, stats: d.stats })),
+        );
+      }
+      if (url.pathname === '/api/pairing' && req.method === 'GET') {
+        return json(res, 200, { code: pairing.currentCode, expiresAt: pairing.codeExpiresAt, paired: pairing.list() });
+      }
+      if (url.pathname === '/api/pairing/revoke' && req.method === 'POST') {
+        pairing.revokeAll();
+        log(`all device pairings revoked; new pairing code: ${pairing.currentCode}`);
+        return json(res, 200, { ok: true });
       }
       if (url.pathname === '/api/rpc' && req.method === 'POST') {
         const body = JSON.parse(await readBody(req)) as { method?: unknown; params?: Record<string, unknown>; device?: string; timeoutMs?: number };
@@ -233,27 +266,29 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
       }
       json(res, 404, { error: 'not found' });
     } catch (e) {
-      log(`http error: ${String(e)}`);
+      log(`http error: ${redactText(String(e))}`);
       if (!res.headersSent) json(res, 500, { error: 'internal error' });
     }
   });
 
   // ------------------------------------------------------------ WebSocket
   const wss = new WebSocketServer({ noServer: true, maxPayload: MAX_MESSAGE_BYTES });
+  const refuse = (socket: { write(s: string): void; destroy(): void }, status: string) => {
+    socket.write(`HTTP/1.1 ${status}\r\n\r\n`);
+    socket.destroy();
+  };
   http.on('upgrade', (req, socket, head) => {
     const origin = checkRequestOrigin(req, opts.lan);
     if (!origin.ok) {
       log(`rejected websocket: ${origin.reason}`);
-      socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
-      socket.destroy();
-      return;
+      return refuse(socket, '403 Forbidden');
     }
     if (new URL(req.url ?? '/', 'http://localhost').pathname === '/channel') {
-      // The Claude Code channel bridge runs on this computer: loopback only, even with --lan.
-      if (!isLoopback(req.socket.remoteAddress)) {
-        socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
-        socket.destroy();
-        return;
+      // The Claude Code channel bridge runs on this computer: loopback only, even with --lan, and token-authenticated.
+      if (!isLoopback(req.socket.remoteAddress)) return refuse(socket, '403 Forbidden');
+      if (!bearerOk(req, token)) {
+        log('rejected channel bridge: missing or invalid token');
+        return refuse(socket, '401 Unauthorized');
       }
       wss.handleUpgrade(req, socket, head, (ws) => hub.accept(ws));
       return;
@@ -280,30 +315,31 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
       if (!device) {
         if (msg.type !== 'hello') return ws.close(4001, 'expected hello');
         clearTimeout(helloTimer);
+        if (remote && !opts.lan) return ws.close(4003, 'remote connections disabled');
+        const mustPair = remote || opts.requirePairing === true;
+        let trusted = pairing.verifyToken(msg.auth?.token);
         let issued: string | undefined;
-        if (remote) {
-          if (!opts.lan) return ws.close(4003, 'remote connections disabled');
-          if (!pairing.verifyToken(msg.auth?.token)) {
-            if (!msg.auth?.pairingCode) {
-              send({ type: 'auth.required', reason: 'Enter the pairing code shown in the server terminal.', pairing: true });
-              return;
-            }
-            const r = pairing.redeem(msg.auth.pairingCode);
-            if (!r.ok) {
-              log(`pairing failed from ${addr}: ${r.reason}`);
-              send({ type: 'auth.required', reason: r.reason, pairing: true });
-              return;
-            }
-            issued = r.token;
-            log(`paired device at ${addr}; new pairing code: ${pairing.currentCode}`);
+        if (!trusted && msg.auth?.pairingCode) {
+          const r = pairing.redeem(msg.auth.pairingCode, `${msg.device.appName ?? 'app'} on ${msg.device.platform}${msg.device.model ? ` (${msg.device.model})` : ''}`);
+          if (!r.ok) {
+            log(`pairing failed from ${addr}: ${r.reason}`);
+            send({ type: 'auth.required', reason: r.reason, pairing: true });
+            return;
           }
+          trusted = true;
+          issued = r.token;
+          log(`paired ${msg.device.appName ?? 'app'} on ${msg.device.platform}${remote ? ` at ${addr}` : ''}; new pairing code: ${pairing.currentCode}`);
         }
-        device = new DeviceSession(ws, msg.device, msg.capabilities, remote);
+        if (mustPair && !trusted) {
+          send({ type: 'auth.required', reason: 'Enter the pairing code shown in the server terminal.', pairing: true });
+          return;
+        }
+        device = new DeviceSession(ws, msg.device, msg.capabilities, remote, trusted);
         devices.add(device);
         const session = newSession(device);
         if (session) sessions.set(device.id, session);
-        log(`device connected: ${device.label}${remote ? ` from ${addr}` : ''}`);
-        device.send({ type: 'welcome', sessionId: device.id, ...(issued ? { deviceToken: issued } : {}), server: serverInfo(session) });
+        log(`device connected: ${device.label}${remote ? ` from ${addr}` : ''}${trusted ? ' (paired)' : ''}`);
+        device.send({ type: 'welcome', sessionId: device.id, trusted, ...(issued ? { deviceToken: issued } : {}), server: serverInfo(session) });
         return;
       }
 
@@ -342,8 +378,7 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
           startSignIn();
           return;
         case 'approval.response':
-          approvals.get(msg.id)?.(msg.approved);
-          approvals.delete(msg.id);
+          approvals.answer(msg.id, msg.approved);
           return;
         case 'ping':
           device.send({ type: 'pong', ts: msg.ts });
@@ -361,7 +396,7 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
       sessions.delete(device.id);
       device.close();
     });
-    ws.on('error', (e) => log(`socket error: ${e.message}`));
+    ws.on('error', (e) => log(`socket error: ${redactText(e.message)}`));
   };
 
   await new Promise<void>((resolve, reject) => {
@@ -373,9 +408,13 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
 
   return {
     port,
+    token,
     devices,
     pairing,
     agent: () => availability,
+    get authNotices() {
+      return authNotices;
+    },
     close: async () => {
       pendingSignIn?.cancel();
       sessions.forEach((s) => s.close());

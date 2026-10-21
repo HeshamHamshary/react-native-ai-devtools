@@ -34,18 +34,27 @@ class HubConnection {
   private closed = false;
   private readonly url: string;
   private readonly chat: boolean;
+  private readonly token: string | undefined;
   private readonly log: (line: string) => void;
+  private warnedAuth = false;
 
-  constructor(url: string, chat: boolean, log: (line: string) => void) {
+  constructor(url: string, chat: boolean, token: string | undefined, log: (line: string) => void) {
     this.url = url;
     this.chat = chat;
+    this.token = token;
     this.log = log;
   }
 
   connect(): void {
     if (this.closed) return;
-    const ws = new WebSocket(this.url);
+    const ws = new WebSocket(this.url, { headers: this.token ? { authorization: `Bearer ${this.token}` } : {} });
     this.ws = ws;
+    ws.on('unexpected-response', (_req, res) => {
+      if (res.statusCode === 401 && !this.warnedAuth) {
+        this.warnedAuth = true;
+        this.log('the devtools server rejected this bridge\'s token; restart Claude Code after restarting the server');
+      }
+    });
     ws.on('open', () => this.send({ type: 'hello', chat: this.chat }));
     ws.on('message', (data) => {
       const m = parseHubMessage(data.toString());
@@ -104,22 +113,37 @@ class HubConnection {
   }
 }
 
-const NOT_RUNNING = "The devtools server isn't reachable. Start it with `react-native-agent-devtools-server`.";
+const NOT_RUNNING = "The devtools server isn't reachable (or doesn't accept this bridge's token). Start it with `react-native-agent-devtools-server`.";
+
+export interface BridgeOptions {
+  port: number;
+  version: string;
+  log: (line: string) => void;
+  /** The server token (read from the 0600 token file by the CLI). */
+  token: string | undefined;
+  /**
+   * true: the channel Claude Code loads with --dangerously-load-development-channels
+   * (app chat + permission relay). false: a plain stdio MCP server with the mobile tools.
+   */
+  channel: boolean;
+}
 
 /**
- * The channel MCP server Claude Code starts over stdio. It forwards app chat messages
- * into the session, exposes the mobile_* tools plus `reply`, and relays Claude Code's
- * permission prompts to the app. It never talks to a model itself.
+ * The MCP server Claude Code starts over stdio. As a channel it forwards app chat
+ * messages into the session, exposes `reply`, and relays Claude Code's permission
+ * prompts to the app; in both modes it exposes the mobile_* tools. It never talks to
+ * a model itself.
  */
-export async function runChannelBridge(opts: { port: number; version: string; log: (line: string) => void }): Promise<void> {
+export async function runChannelBridge(opts: BridgeOptions): Promise<void> {
   const mcp = new McpServer(
     { name: CHANNEL_SERVER_NAME, version: opts.version },
     {
-      capabilities: { experimental: { 'claude/channel': {}, 'claude/channel/permission': {} }, tools: {} },
-      instructions: `${CHANNEL_INSTRUCTIONS}\n\n${MCP_INSTRUCTIONS}`,
+      capabilities: opts.channel ? { experimental: { 'claude/channel': {}, 'claude/channel/permission': {} }, tools: {} } : { tools: {} },
+      instructions: opts.channel ? `${CHANNEL_INSTRUCTIONS}\n\n${MCP_INSTRUCTIONS}` : MCP_INSTRUCTIONS,
     },
   );
-  const hub = new HubConnection(`ws://127.0.0.1:${opts.port}/channel`, process.env[CHAT_ENV] === '1', opts.log);
+  const hub = new HubConnection(`ws://127.0.0.1:${opts.port}/channel`, opts.channel && process.env[CHAT_ENV] === '1', opts.token, opts.log);
+  if (!opts.token) opts.log('no server token found: start the devtools server first (it creates one), then restart Claude Code');
 
   for (const t of MOBILE_TOOLS) {
     mcp.registerTool(
@@ -128,6 +152,15 @@ export async function runChannelBridge(opts: { port: number; version: string; lo
       async (args: Record<string, unknown>) => (await hub.callTool(t.name, args ?? {})) as never,
     );
   }
+  if (opts.channel) registerChannel(mcp, hub, opts.log);
+
+  const transport = new StdioServerTransport();
+  transport.onclose = () => hub.close();
+  await mcp.connect(transport);
+  hub.connect();
+}
+
+function registerChannel(mcp: McpServer, hub: HubConnection, log: (line: string) => void): void {
   mcp.registerTool(
     'reply',
     {
@@ -144,7 +177,7 @@ export async function runChannelBridge(opts: { port: number; version: string; lo
   });
 
   const notify = (method: string, params: Record<string, unknown>) =>
-    mcp.server.notification({ method, params } as never).catch((e: unknown) => opts.log(`could not notify Claude Code: ${String(e)}`));
+    mcp.server.notification({ method, params } as never).catch((e: unknown) => log(`could not notify Claude Code: ${String(e)}`));
   hub.onMessage = (m) => {
     if (m.type === 'message') {
       void notify('notifications/claude/channel', { content: m.content, meta: { chat_id: m.chatId, device: m.device, platform: m.platform } });
@@ -157,9 +190,4 @@ export async function runChannelBridge(opts: { port: number; version: string; lo
       void notify('notifications/claude/channel/permission', { request_id: m.requestId, behavior: m.behavior });
     }
   };
-
-  const transport = new StdioServerTransport();
-  transport.onclose = () => hub.close();
-  await mcp.connect(transport);
-  hub.connect();
 }

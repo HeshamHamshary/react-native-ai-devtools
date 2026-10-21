@@ -1,40 +1,8 @@
 import { execFile, spawn } from 'node:child_process';
-import { existsSync, mkdirSync } from 'node:fs';
-import { homedir } from 'node:os';
+import { existsSync } from 'node:fs';
 import { createRequire } from 'node:module';
-import { join } from 'node:path';
 import { redactText } from 'react-native-agent-devtools-protocol';
-
-/**
- * Claude Code config directory used only by the in-app agent. Because it is not the
- * developer's own ~/.claude, the agent never inherits their personal claude.ai login,
- * settings or plugins. The only login it ever holds is the Anthropic Console sign-in
- * started from the app (`claude auth login --console`).
- */
-export function agentConfigDir(env = process.env): string {
-  const dir = join(env.XDG_CONFIG_HOME || join(homedir(), '.config'), 'react-native-agent-devtools', 'claude');
-  mkdirSync(dir, { recursive: true, mode: 0o700 });
-  return dir;
-}
-
-/** Personal subscription tokens are never acceptable, and a selected `ant` profile would bypass the check. */
-const STRIPPED_ENV = ['CLAUDE_CODE_OAUTH_TOKEN', 'CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR', 'ANTHROPIC_PROFILE'];
-
-/** Environment for every Claude Code process the server starts (sessions, sign-in, status). */
-export function agentEnv(env = process.env): Record<string, string> {
-  const out: Record<string, string> = {};
-  for (const [k, v] of Object.entries(env)) if (typeof v === 'string' && !STRIPPED_ENV.includes(k)) out[k] = v;
-  const dir = agentConfigDir(env);
-  out.CLAUDE_CONFIG_DIR = dir;
-  // Ignore `ant auth login` profiles too, so the credential source is always one we can check.
-  out.ANTHROPIC_CONFIG_DIR = join(dir, 'anthropic-profiles');
-  return out;
-}
-
-/** Credentials configured in the server's own environment take precedence over the sign-in. */
-export function hasEnvCredentials(env = process.env): boolean {
-  return !!env.ANTHROPIC_API_KEY || ['CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX', 'CLAUDE_CODE_USE_FOUNDRY'].some((k) => env[k] === '1');
-}
+import { agentEnv } from './credentials.ts';
 
 /** The Claude Code binary bundled with the Agent SDK, so sign-in and sessions share one version. */
 export function claudeBinary(): string | undefined {
@@ -77,7 +45,7 @@ export const claudeCodeSignIn: SignInBackend = {
     if (!bin) return Promise.resolve({ loggedIn: false });
     return new Promise((resolve) => {
       // Exits 1 when signed out; the JSON on stdout is authoritative either way.
-      execFile(bin, ['auth', 'status', '--json'], { env: agentEnv(), timeout: 15_000 }, (_err, stdout) => {
+      execFile(bin, ['auth', 'status', '--json'], { env: agentEnv('console'), timeout: 15_000 }, (_err, stdout) => {
         try {
           resolve({ loggedIn: (JSON.parse(stdout) as { loggedIn?: unknown }).loggedIn === true });
         } catch {
@@ -96,7 +64,7 @@ export const claudeCodeSignIn: SignInBackend = {
       };
     }
     // stdin stays open so the CLI keeps waiting for the browser callback.
-    const child = spawn(bin, ['auth', 'login', '--console'], { env: agentEnv(), stdio: ['pipe', 'pipe', 'pipe'] });
+    const child = spawn(bin, ['auth', 'login', '--console'], { env: agentEnv('console'), stdio: ['pipe', 'pipe', 'pipe'] });
     let output = '';
     const onData = (chunk: Buffer) => {
       const text = chunk.toString('utf8');
@@ -137,5 +105,5 @@ export const claudeCodeSignIn: SignInBackend = {
 export function signOut(): Promise<boolean> {
   const bin = claudeBinary();
   if (!bin) return Promise.resolve(false);
-  return new Promise((resolve) => execFile(bin, ['auth', 'logout'], { env: agentEnv(), timeout: 15_000 }, (err) => resolve(!err)));
+  return new Promise((resolve) => execFile(bin, ['auth', 'logout'], { env: agentEnv('console'), timeout: 15_000 }, (err) => resolve(!err)));
 }

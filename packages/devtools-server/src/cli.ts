@@ -5,9 +5,11 @@ import { networkInterfaces } from 'node:os';
 import { resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 
-import { agentEnv, claudeBinary } from './agent/account.ts';
+import { claudeBinary } from './agent/account.ts';
+import { AUTH_MODES, agentEnv, stateDir } from './agent/credentials.ts';
 import { runChannelBridge } from './channel/bridge.ts';
 import { launchClaudeCode } from './channel/launch.ts';
+import { readServerToken, rotateServerToken } from './security/serverToken.ts';
 import { SERVER_VERSION, startServer } from './server.ts';
 
 const c = {
@@ -23,37 +25,43 @@ const HELP = `react-native-agent-devtools-server ${SERVER_VERSION}
 
 Usage:
   react-native-agent-devtools-server [start] [options]   Run the bridge (default)
-  react-native-agent-devtools-server call <method> [json-params] [--device ios|android|<id>]
-                                                         Invoke a device RPC on the connected app
-  react-native-agent-devtools-server bench [--iterations N] [--port N]
-                                                         Measure device-side latency (no model)
-  react-native-agent-devtools-server devices [--port N]  List connected apps
-  react-native-agent-devtools-server login               Sign the in-app agent in (same as "Set up Claude" in the app)
-  react-native-agent-devtools-server logout              Sign the in-app agent out
   react-native-agent-devtools-server claude [--cwd DIR] [-- <claude args>]
                                                          Start your own Claude Code with the app chat connected
                                                          (channels, research preview; uses your Claude Code login)
+  react-native-agent-devtools-server mcp                 Stdio MCP server with the mobile tools, for
+                                                         claude mcp add rn-agent -- npx react-native-agent-devtools-server mcp
+  react-native-agent-devtools-server call <method> [json-params] [--device ios|android|<id>]
+                                                         Invoke a device RPC on the connected app
+  react-native-agent-devtools-server bench [--iterations N]
+                                                         Measure device-side latency (no model)
+  react-native-agent-devtools-server devices             List connected apps
+  react-native-agent-devtools-server pair                Show the current pairing code
+  react-native-agent-devtools-server unpair              Revoke every paired device
+  react-native-agent-devtools-server login | logout      Sign the in-app agent in/out (Anthropic Console)
+  react-native-agent-devtools-server token [--rotate]    Print (or replace) the local API token
   react-native-agent-devtools-server channel             The channel bridge Claude Code starts (not run by hand)
 
 Options:
-  --port <n>             Port (default 8765)
-  --lan                  Listen on all interfaces for physical devices (pairing code required)
-  --repo <path>          Let the agent read this source tree (secrets excluded). Repeatable.
-  --allow-edits          Allow Edit/Write inside --repo roots, each approved on the device
-  --model <id>           Model for the in-app agent (default: SDK default)
-  --no-agent             Disable the in-app chat agent (MCP and RPC still work)
-  --no-mcp               Disable the /mcp endpoint for Claude Code
-  --load-project-settings  Load CLAUDE.md / .claude settings from the repo
-  --demo-agent           Scripted replies (labelled, no model) for UI development
+  --port <n>               Port (default 8765)
+  --auth <mode>            Credentials for the in-app agent: ${AUTH_MODES.join(' | ')}
+                           (default: the Console sign-in from "Set up Claude", if completed)
+  --lan                    Listen on all interfaces for physical devices (pairing required)
+  --require-pairing        Require pairing for every device, including simulators
+  --repo <path>            Let the agent read this source tree (secrets excluded). Repeatable.
+  --allow-edits            Allow Edit/Write inside --repo roots, each approved on a paired device
+  --project-instructions   Add the repo's CLAUDE.md to the agent's instructions (text only)
+  --model <id>             Model for the in-app agent (default: SDK default)
+  --no-agent               Disable the in-app chat agent (MCP and RPC still work)
+  --no-mcp                 Disable the /mcp endpoint
+  --demo-agent             Scripted replies (labelled, no model) for UI development
   -h, --help
 
-The in-app chat uses the Claude Agent SDK. Tap "Set up Claude" in the app to sign in with your
-Anthropic Console account (API usage billing). ANTHROPIC_API_KEY or Bedrock/Vertex credentials in
-this process's environment also work.
+Credentials are never picked up implicitly. An ANTHROPIC_API_KEY in this shell is used only
+with --auth api-key; a personal claude.ai login is never used by the in-app agent.
 
 Or use your own Claude Code login, with no new API key:
   react-native-agent-devtools-server claude              chat from the app, answered by your Claude Code session
-  claude mcp add --transport http rn-agent http://127.0.0.1:8765/mcp
+  claude mcp add rn-agent -- npx react-native-agent-devtools-server mcp
                                                          drive the app from Claude Code in the terminal
 `;
 
@@ -66,15 +74,29 @@ function lanAddresses(): string[] {
 
 let deviceSelector: string | undefined;
 
-async function rpc(port: number, method: string, params: unknown): Promise<{ ok: boolean; result?: unknown; deviceMs?: number; rttMs?: number; error?: { code: string; message: string } }> {
-  const res = await fetch(`http://127.0.0.1:${port}/api/rpc`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ method, params, timeoutMs: 90_000, ...(deviceSelector ? { device: deviceSelector } : {}) }),
+/** Authenticated request to the running server's local API. */
+async function api(port: number, path: string, init: { method?: string; body?: unknown } = {}): Promise<unknown> {
+  const token = readServerToken(stateDir());
+  if (!token) throw new Error('no server token yet: start the server first (react-native-agent-devtools-server)');
+  const res = await fetch(`http://127.0.0.1:${port}${path}`, {
+    method: init.method ?? 'GET',
+    headers: { authorization: `Bearer ${token}`, ...(init.body !== undefined ? { 'content-type': 'application/json' } : {}) },
+    ...(init.body !== undefined ? { body: JSON.stringify(init.body) } : {}),
+  }).catch(() => {
+    throw new Error(`the devtools server is not running on port ${port}`);
   });
   if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
-  return (await res.json()) as never;
+  return res.json();
 }
+
+const rpc = (port: number, method: string, params: unknown) =>
+  api(port, '/api/rpc', { method: 'POST', body: { method, params, timeoutMs: 90_000, ...(deviceSelector ? { device: deviceSelector } : {}) } }) as Promise<{
+    ok: boolean;
+    result?: unknown;
+    deviceMs?: number;
+    rttMs?: number;
+    error?: { code: string; message: string };
+  }>;
 
 async function main() {
   const argv = process.argv.slice(2);
@@ -90,7 +112,10 @@ async function main() {
       model: { type: 'string' },
       'no-agent': { type: 'boolean', default: false },
       'no-mcp': { type: 'boolean', default: false },
-      'load-project-settings': { type: 'boolean', default: false },
+      'project-instructions': { type: 'boolean', default: false },
+      auth: { type: 'string' },
+      'require-pairing': { type: 'boolean', default: false },
+      rotate: { type: 'boolean', default: false },
       'demo-agent': { type: 'boolean', default: false },
       iterations: { type: 'string', default: '20' },
       device: { type: 'string' },
@@ -115,8 +140,34 @@ async function main() {
   }
 
   if (command === 'devices') {
-    const res = await fetch(`http://127.0.0.1:${port}/api/devices`);
-    process.stdout.write(`${JSON.stringify(await res.json(), null, 2)}\n`);
+    process.stdout.write(`${JSON.stringify(await api(port, '/api/devices'), null, 2)}\n`);
+    return;
+  }
+
+  if (command === 'pair') {
+    const p = (await api(port, '/api/pairing')) as { code: string; expiresAt: number; paired: { label?: string; created: number }[] };
+    process.stdout.write(
+      `pairing code ${c.orange(p.code)} ${c.dim(`(single use, expires ${new Date(p.expiresAt).toLocaleTimeString()})`)}\n` +
+        `paired devices: ${p.paired.length ? p.paired.map((d) => `${d.label ?? 'device'} (${new Date(d.created).toLocaleDateString()})`).join(', ') : 'none'}\n`,
+    );
+    return;
+  }
+
+  if (command === 'unpair') {
+    await api(port, '/api/pairing/revoke', { method: 'POST' });
+    process.stdout.write('all paired devices were revoked; they must pair again\n');
+    return;
+  }
+
+  if (command === 'token') {
+    if (values.rotate) {
+      rotateServerToken(stateDir());
+      process.stdout.write('token removed: restart the server to create a new one, then restart Claude Code\n');
+      return;
+    }
+    const token = readServerToken(stateDir());
+    if (!token) throw new Error('no server token yet: start the server first');
+    process.stdout.write(`${token}\n`);
     return;
   }
 
@@ -125,16 +176,16 @@ async function main() {
     if (!bin) throw new Error('the Claude Code binary bundled with the Agent SDK is missing; reinstall dependencies');
     // Interactive, so the paste-a-code fallback works on machines without a local browser.
     const args = command === 'login' ? ['auth', 'login', '--console'] : ['auth', 'logout'];
-    const child = spawn(bin, args, { env: agentEnv(), stdio: 'inherit' });
+    const child = spawn(bin, args, { env: agentEnv('console'), stdio: 'inherit' });
     process.exitCode = await new Promise<number>((r) => child.on('close', (code) => r(code ?? 1)));
     return;
   }
 
-  if (command === 'channel') {
+  if (command === 'channel' || command === 'mcp') {
     // Claude Code talks MCP over this process's stdio: nothing else may write to stdout.
-    const log = (line: string) => process.stderr.write(`[rn-agent channel] ${line}\n`);
+    const log = (line: string) => process.stderr.write(`[rn-agent ${command}] ${line}\n`);
     process.stdin.on('end', () => process.exit(0));
-    await runChannelBridge({ port, version: SERVER_VERSION, log });
+    await runChannelBridge({ port, version: SERVER_VERSION, log, token: readServerToken(stateDir()), channel: command === 'channel' });
     return;
   }
 
@@ -150,6 +201,7 @@ async function main() {
     ];
     process.exitCode = await launchClaudeCode({
       port,
+      token: readServerToken(stateDir()),
       cwd: values.cwd ? resolve(base, values.cwd) : base,
       bridgeCommand,
       claudeArgs: positionals,
@@ -205,30 +257,38 @@ async function main() {
     allowEdits: values['allow-edits'] === true,
     ...(values.model ? { model: values.model } : {}),
     agent: !values['no-agent'],
+    ...((values.auth ?? process.env.RNAD_AUTH) ? { auth: values.auth ?? process.env.RNAD_AUTH } : {}),
     mcp: !values['no-mcp'],
-    loadProjectSettings: values['load-project-settings'] === true,
+    projectInstructions: values['project-instructions'] === true,
+    requirePairing: values['require-pairing'] === true,
     demoAgent: values['demo-agent'] === true,
     log,
   });
 
   const avail = server.agent();
+  const agentLine = avail.available
+    ? c.green('ready') + c.dim(` (credentials: ${avail.source}${values.model ? `, model ${values.model}` : ''})`)
+    : avail.reason?.startsWith('Not signed in')
+      ? c.yellow('not signed in: tap "Set up Claude" in the app') + c.dim(' (or start with --auth)')
+      : c.yellow(`unavailable: ${avail.reason}`);
   const out: string[] = [
     '',
     `${c.orange('✦')} ${c.bold('react-native-agent-devtools-server')} ${c.dim(`v${SERVER_VERSION}`)}`,
     '',
     `  ${c.bold('listening')}    ws://${values.lan ? '0.0.0.0' : '127.0.0.1'}:${server.port} ${c.dim(values.lan ? '(all interfaces)' : '(loopback only)')}`,
-    `  ${c.bold('simulators')}   iOS simulator and Android emulator connect automatically via the Metro host`,
+    `  ${c.bold('simulators')}   iOS simulator and Android emulator connect automatically via the Metro host${values['require-pairing'] ? c.dim(' (pairing required)') : ''}`,
     `               ${c.dim(`USB Android: adb reverse tcp:${server.port} tcp:${server.port}`)}`,
-    `  ${c.bold('agent')}        ${avail.available ? c.green('ready') + c.dim(` (credentials: ${avail.source}${values.model ? `, model ${values.model}` : ''})`) : c.yellow(`not signed in — tap "Set up Claude" in the app`) + c.dim(avail.reason && !avail.reason.startsWith('Not signed in') ? ` (${avail.reason})` : '')}`,
+    `  ${c.bold('pairing code')} ${c.orange(server.pairing.currentCode)} ${c.dim('pair an app to approve edits and Claude Code permissions from it')}`,
+    `  ${c.bold('agent')}        ${agentLine}`,
+    ...server.authNotices.map((n) => `               ${c.dim(n)}`),
     `  ${c.bold('repo access')}  ${repoRoots.length ? `read${values['allow-edits'] ? ' + approved edits' : '-only'}: ${repoRoots.join(', ')} ${c.dim('(secret files always excluded)')}` : c.dim('disabled (use --repo <path>)')}`,
     `  ${c.bold('Claude Code')}  chat from the app with your own Claude Code: react-native-agent-devtools-server claude ${c.dim('(channels preview)')}`,
-    `               ${values['no-mcp'] ? c.dim('MCP disabled') : `terminal only: claude mcp add --transport http rn-agent http://127.0.0.1:${server.port}/mcp`}`,
+    `               ${c.dim('terminal only:')} claude mcp add rn-agent -- npx react-native-agent-devtools-server mcp`,
   ];
   if (values.lan) {
     out.push(
       '',
       c.yellow('  ⚠ LAN mode: the server is reachable from your network. Devices must pair; control APIs stay loopback-only.'),
-      `  ${c.bold('pairing code')} ${c.orange(server.pairing.currentCode)} ${c.dim('(single use, rotates after pairing, expires in 10 min)')}`,
       `  ${c.bold('device URL')}   ${lanAddresses().map((a) => `ws://${a}:${server.port}`).join('  ') || '(no LAN address found)'}`,
     );
   }

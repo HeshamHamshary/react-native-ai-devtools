@@ -1,25 +1,34 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { networkInterfaces } from 'node:os';
-import { startServer, type RunningServer } from './server.ts';
+import { mkdtempSync, readFileSync, statSync } from 'node:fs';
+import { networkInterfaces, tmpdir } from 'node:os';
+import { join } from 'node:path';
+import type { ServerMessage } from 'react-native-agent-devtools-protocol';
+import { Approvals } from './security/approvals.ts';
+import { startServer, type RunningServer, type ServerOptions } from './server.ts';
 import { FakeDevice } from './testing/FakeDevice.ts';
+import type { DeviceSession } from './transport/devices.ts';
 
 let server: RunningServer;
 let base: string;
 const logs: string[] = [];
 
+/** Every test server keeps its token and pairings in a throwaway directory. */
+const options = (extra: Partial<ServerOptions> = {}): ServerOptions => ({
+  port: 0,
+  lan: false,
+  repoRoots: [],
+  allowEdits: false,
+  agent: true,
+  mcp: true,
+  log: () => {},
+  stateDir: mkdtempSync(join(tmpdir(), 'rnad-state-')),
+  env: {},
+  ...extra,
+});
+
 before(async () => {
-  server = await startServer({
-    port: 0,
-    lan: false,
-    repoRoots: [],
-    allowEdits: false,
-    agent: true,
-    mcp: true,
-    loadProjectSettings: false,
-    log: (l) => logs.push(l),
-    agentAvailable: { available: false, reason: 'no credentials (test)' },
-  });
+  server = await startServer(options({ log: (l) => logs.push(l), agentAvailable: { available: false, reason: 'no credentials (test)' } }));
   base = `127.0.0.1:${server.port}`;
 });
 
@@ -35,11 +44,13 @@ async function connect(): Promise<FakeDevice> {
   return d;
 }
 
+const authed = (token = server.token) => ({ authorization: `Bearer ${token}` });
+
 const rpc = async (method: string, params: unknown = {}, timeoutMs?: number) =>
   (await (
     await fetch(`http://${base}/api/rpc`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: { 'content-type': 'application/json', ...authed() },
       body: JSON.stringify({ method, params, ...(timeoutMs ? { timeoutMs } : {}) }),
     })
   ).json()) as { ok: boolean; result?: unknown; deviceMs?: number; rttMs?: number; error?: { code: string } };
@@ -83,7 +94,7 @@ test('/api/rpc forwards to the device and reports timing', async () => {
   assert.deepEqual(r.result, { text: 'screen: Login' });
   assert.equal(r.deviceMs, 3);
   assert.ok(typeof r.rttMs === 'number');
-  const bad = await (await fetch(`http://${base}/api/rpc`, { method: 'POST', body: JSON.stringify({ method: 'eval' }) })).json();
+  const bad = await (await fetch(`http://${base}/api/rpc`, { method: 'POST', headers: authed(), body: JSON.stringify({ method: 'eval' }) })).json();
   assert.match((bad as { error: string }).error, /unknown method/);
   d.close();
 });
@@ -118,7 +129,7 @@ test('MCP endpoint lists mobile tools and calls the device', async () => {
   const post = async (body: unknown) => {
     const res = await fetch(`http://${base}/mcp`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream' },
+      headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream', ...authed() },
       body: JSON.stringify(body),
     });
     return (await res.json()) as { result?: { tools?: { name: string }[]; content?: { type: string; text: string }[] } };
@@ -148,17 +159,7 @@ const lanIp = Object.values(networkInterfaces())
   .find((i) => i && i.family === 'IPv4' && !i.internal)?.address;
 
 test('LAN mode requires pairing for non-loopback devices', { skip: !lanIp && 'no LAN interface' }, async () => {
-  const lan = await startServer({
-    port: 0,
-    lan: true,
-    repoRoots: [],
-    allowEdits: false,
-    agent: false,
-    mcp: false,
-    loadProjectSettings: false,
-    log: () => {},
-    agentAvailable: { available: false },
-  });
+  const lan = await startServer(options({ lan: true, agent: false, mcp: false, agentAvailable: { available: false } }));
   try {
     const url = `ws://${lanIp}:${lan.port}`;
     const a = new FakeDevice(url);
@@ -180,7 +181,7 @@ test('LAN mode requires pairing for non-loopback devices', { skip: !lanIp && 'no
     assert.equal(w2.deviceToken, undefined, 'existing token accepted without re-pairing');
 
     // Control APIs stay loopback-only even in LAN mode.
-    const res = await fetch(`http://${lanIp}:${lan.port}/api/devices`);
+    const res = await fetch(`http://${lanIp}:${lan.port}/api/devices`, { headers: authed(lan.token) });
     assert.equal(res.status, 403);
     b.close();
   } finally {
@@ -189,20 +190,13 @@ test('LAN mode requires pairing for non-loopback devices', { skip: !lanIp && 'no
 });
 
 test('"Set up Claude" runs Anthropic sign-in on the computer and enables the agent live', async () => {
-  const savedKey = process.env.ANTHROPIC_API_KEY;
-  delete process.env.ANTHROPIC_API_KEY;
   let loggedIn = false;
   let starts = 0;
   let finish: (r: { ok: boolean; reason?: string }) => void = () => {};
-  const s = await startServer({
-    port: 0,
-    lan: false,
-    repoRoots: [],
-    allowEdits: false,
-    agent: true,
+  const verified: string[] = [];
+  const s = await startServer(
+    options({
     mcp: false,
-    loadProjectSettings: false,
-    log: () => {},
     signIn: {
       status: async () => ({ loggedIn }),
       start: () => {
@@ -213,9 +207,13 @@ test('"Set up Claude" runs Anthropic sign-in on the computer and enables the age
         return { done, cancel: () => resolve({ ok: false, reason: 'Sign-in cancelled.' }) };
       },
     },
-    verifyAuth: async () => (loggedIn ? { ok: true, source: '/login managed key' } : { ok: false, source: 'none', reason: 'no login' }),
+    verifyAuth: async (mode) => {
+      verified.push(mode);
+      return loggedIn ? { ok: true, source: 'Anthropic Console sign-in' } : { ok: false, source: 'none', reason: 'no login' };
+    },
     sessionFactory: () => undefined,
-  });
+    }),
+  );
   try {
     const d = new FakeDevice(`ws://127.0.0.1:${s.port}`);
     await d.opened();
@@ -243,11 +241,179 @@ test('"Set up Claude" runs Anthropic sign-in on the computer and enables the age
     finish({ ok: true });
     const w2 = await d.next('welcome');
     assert.equal(w2.server.agent.available, true, 'connected device is enabled without reconnecting');
-    assert.equal(s.agent().source, '/login managed key');
+    assert.equal(w2.server.agent.credentials, 'Anthropic Console sign-in');
+    assert.deepEqual(verified, ['console'], 'credentials checked only once signed in, and only for the Console sign-in');
     assert.equal(d.inbox.filter((m) => m.type === 'setup.status').length, 0, 'no failure from the cancelled attempt');
     d.close();
   } finally {
-    if (savedKey !== undefined) process.env.ANTHROPIC_API_KEY = savedKey;
     await s.close();
   }
+});
+
+test('local control APIs require the server token; /health reveals nothing else', async () => {
+  const health = (await (await fetch(`http://${base}/health`)).json()) as Record<string, unknown>;
+  assert.deepEqual(Object.keys(health).sort(), ['ok', 'version']);
+  for (const [path, method] of [['/api/devices', 'GET'], ['/api/rpc', 'POST'], ['/mcp', 'POST'], ['/api/channel/arm', 'POST'], ['/api/pairing', 'GET']]) {
+    assert.equal((await fetch(`http://${base}${path}`, { method })).status, 401, `${path} without a token`);
+    assert.equal((await fetch(`http://${base}${path}`, { method, headers: authed('x'.repeat(43)) })).status, 401, `${path} with a wrong token`);
+  }
+  assert.equal((await fetch(`http://${base}/api/devices`, { headers: authed() })).status, 200);
+});
+
+test('the server token is stable across restarts and readable only by the developer', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'rnad-state-'));
+  const a = await startServer(options({ stateDir: dir, mcp: false, agentAvailable: { available: false } }));
+  await a.close();
+  const b = await startServer(options({ stateDir: dir, mcp: false, agentAvailable: { available: false } }));
+  await b.close();
+  assert.equal(a.token, b.token);
+  assert.ok(a.token.length >= 43);
+  assert.equal(statSync(join(dir, 'server-token')).mode & 0o777, 0o600);
+});
+
+test('a simulator can pair voluntarily; pairings persist as hashes and can be revoked', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'rnad-state-'));
+  const s1 = await startServer(options({ stateDir: dir, mcp: false, agentAvailable: { available: false } }));
+  let token: string | undefined;
+  try {
+    const plain = new FakeDevice(`ws://127.0.0.1:${s1.port}`);
+    await plain.opened();
+    plain.hello();
+    assert.equal((await plain.next('welcome')).trusted, false, 'loopback without pairing: connected but not trusted');
+    plain.close();
+
+    const d = new FakeDevice(`ws://127.0.0.1:${s1.port}`);
+    await d.opened();
+    d.hello({ pairingCode: s1.pairing.currentCode });
+    const w = await d.next('welcome');
+    assert.equal(w.trusted, true);
+    token = w.deviceToken;
+    assert.ok(token);
+    d.close();
+  } finally {
+    await s1.close();
+  }
+  const store = readFileSync(join(dir, 'paired-devices.json'), 'utf8');
+  assert.ok(!store.includes(token!), 'only a hash of the device token is stored');
+  assert.equal(statSync(join(dir, 'paired-devices.json')).mode & 0o777, 0o600);
+
+  const s2 = await startServer(options({ stateDir: dir, mcp: false, agentAvailable: { available: false } }));
+  try {
+    const again = new FakeDevice(`ws://127.0.0.1:${s2.port}`);
+    await again.opened();
+    again.hello({ token });
+    assert.equal((await again.next('welcome')).trusted, true, 'still paired after a server restart (e.g. app reload)');
+    again.close();
+
+    const revoked = await fetch(`http://127.0.0.1:${s2.port}/api/pairing/revoke`, { method: 'POST', headers: authed(s2.token) });
+    assert.equal(revoked.status, 200);
+    const after = new FakeDevice(`ws://127.0.0.1:${s2.port}`);
+    await after.opened();
+    after.hello({ token });
+    assert.equal((await after.next('welcome')).trusted, false, 'a revoked token no longer grants trust');
+    after.close();
+  } finally {
+    await s2.close();
+  }
+});
+
+test('--require-pairing makes simulators pair too', async () => {
+  const s = await startServer(options({ requirePairing: true, mcp: false, agentAvailable: { available: false } }));
+  try {
+    const d = new FakeDevice(`ws://127.0.0.1:${s.port}`);
+    await d.opened();
+    d.hello();
+    assert.equal((await d.next('auth.required')).pairing, true);
+    d.hello({ pairingCode: s.pairing.currentCode });
+    assert.equal((await d.next('welcome')).trusted, true);
+    d.close();
+  } finally {
+    await s.close();
+  }
+});
+
+test('approvals are only requested from paired devices', async () => {
+  const fake = (trusted: boolean) => {
+    const sent: ServerMessage[] = [];
+    return { device: { trusted, send: (m: ServerMessage) => sent.push(m) } as unknown as DeviceSession, sent };
+  };
+  const approvals = new Approvals(1_000);
+
+  const stranger = fake(false);
+  assert.equal(await approvals.ask(stranger.device, 'Claude Code wants to use Bash', 'rm -rf build'), undefined);
+  assert.equal(await approvals.approve(stranger.device, 'Allow code edit?', 'The agent wants to edit src/App.tsx.'), false);
+  assert.deepEqual(stranger.sent.map((m) => m.type), ['chat.notice'], 'told why, never asked');
+  assert.match((stranger.sent[0] as { text: string }).text, /Declined automatically: The agent wants to edit src\/App\.tsx\..*Pair this app/);
+
+  const paired = fake(true);
+  const pending = approvals.approve(paired.device, 'Allow code edit?', 'The agent wants to edit src/App.tsx.');
+  const req = paired.sent.find((m) => m.type === 'approval.request') as Extract<ServerMessage, { type: 'approval.request' }>;
+  assert.ok(req);
+  approvals.answer(req.id, true);
+  assert.equal(await pending, true);
+});
+
+test('agent credentials are never adopted from the environment without --auth', async () => {
+  const verified: string[] = [];
+  const verifyAuth = async (mode: string) => {
+    verified.push(mode);
+    return { ok: true, source: 'ANTHROPIC_API_KEY' };
+  };
+  const signIn = { status: async () => ({ loggedIn: false }), start: () => ({ done: new Promise<never>(() => {}), cancel() {} }) };
+  const env = { ANTHROPIC_API_KEY: 'sk-ant-api03-not-chosen' };
+  const implicit = await startServer(options({ mcp: false, env, signIn, verifyAuth, sessionFactory: () => undefined }));
+  try {
+    assert.equal(implicit.agent().available, false);
+    assert.match(implicit.agent().reason ?? '', /Not signed in/);
+    assert.match(implicit.authNotices.join('\n'), /ANTHROPIC_API_KEY is set .* --auth api-key/);
+    assert.deepEqual(verified, [], 'the agent was never even started with it');
+  } finally {
+    await implicit.close();
+  }
+  const explicit = await startServer(options({ mcp: false, env, auth: 'api-key', signIn, verifyAuth, sessionFactory: () => undefined }));
+  try {
+    assert.equal(explicit.agent().available, true);
+    assert.deepEqual(verified, ['api-key']);
+  } finally {
+    await explicit.close();
+  }
+  const missing = await startServer(options({ mcp: false, env: {}, auth: 'api-key', signIn, verifyAuth, sessionFactory: () => undefined }));
+  try {
+    assert.match(missing.agent().reason ?? '', /needs ANTHROPIC_API_KEY/);
+  } finally {
+    await missing.close();
+  }
+});
+
+test('secrets never reach logs or the device', async () => {
+  const secret = `sk-ant-api03-${'S3cr3t'.repeat(15)}`;
+  const lines: string[] = [];
+  const wire: string[] = [];
+  const s = await startServer(
+    options({
+      mcp: false,
+      env: { ANTHROPIC_API_KEY: secret },
+      auth: 'api-key',
+      log: (l) => lines.push(l),
+      verifyAuth: async () => ({ ok: true, source: 'ANTHROPIC_API_KEY' }),
+      sessionFactory: () => ({ busy: false, modelName: undefined, send: async () => {}, interrupt: async () => {}, close() {} }) as never,
+    }),
+  );
+  try {
+    const d = new FakeDevice(`ws://127.0.0.1:${s.port}`);
+    d.ws.on('message', (data) => wire.push(String(data)));
+    await d.opened();
+    d.hello();
+    const w = await d.next('welcome');
+    assert.equal(w.server.agent.credentials, 'ANTHROPIC_API_KEY', 'the source is named, the value is not');
+    d.send({ type: 'chat.send', id: 'm1', text: `my key is ${secret}, password=hunter2` });
+    await new Promise((r) => setTimeout(r, 100));
+    d.close();
+  } finally {
+    await s.close();
+  }
+  const all = [...lines, ...wire, ...s.authNotices].join('\n');
+  assert.ok(lines.some((l) => l.includes('chat ←')), 'the chat line was logged');
+  assert.ok(!all.includes(secret.slice(0, 24)), 'API key never logged or sent');
+  assert.ok(!all.includes('hunter2'));
 });

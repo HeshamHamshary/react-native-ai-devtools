@@ -6,6 +6,8 @@ export const MIN_CLAUDE_CODE = [2, 1, 234] as const;
 
 export interface LaunchOptions {
   port: number;
+  /** The server's local API token (from the token file). */
+  token: string | undefined;
   /** Project directory Claude Code runs in (the bridge is registered for it, local scope). */
   cwd: string;
   /** Command that starts the bridge, e.g. [node, cli.js, 'channel', '--port', '8765']. */
@@ -78,7 +80,11 @@ export async function launchClaudeCode(opts: LaunchOptions): Promise<number> {
   }
 
   // Let the bridge this session starts claim the app chat (and only that one).
-  await fetch(`http://127.0.0.1:${opts.port}/api/channel/arm`, { method: 'POST' }).catch(() => undefined);
+  const armed = await fetch(`http://127.0.0.1:${opts.port}/api/channel/arm`, {
+    method: 'POST',
+    headers: opts.token ? { authorization: `Bearer ${opts.token}` } : {},
+  }).catch(() => undefined);
+  if (!armed?.ok) throw new Error(`The devtools server refused to connect the app chat (${armed ? `HTTP ${armed.status}` : 'unreachable'}). Restart it and run this again.`);
 
   log('starting Claude Code with the app chat connected. Confirm the development-channel prompt it shows.');
   const child = spawn(

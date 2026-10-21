@@ -5,7 +5,6 @@ import {
   createSdkMcpServer,
   query,
   tool,
-  type AccountInfo,
   type CanUseTool,
   type HookCallback,
   type Query,
@@ -17,15 +16,18 @@ import { redactText } from 'react-native-agent-devtools-protocol';
 import type { RepoAccess } from '../security/repoAccess.ts';
 import { CONTROL_TOOLS, MOBILE_TOOLS } from '../tools/mobileTools.ts';
 import type { DeviceSession } from '../transport/devices.ts';
-import { agentEnv } from './account.ts';
+import { agentEnv, agentSettings, authDecision, type AuthMode } from './credentials.ts';
 import { AsyncQueue } from './AsyncQueue.ts';
 import { appStateBlock, systemPrompt } from './prompt.ts';
 
 export interface AgentConfig {
+  /** The credential source the developer chose; the session refuses any other. */
+  auth: AuthMode;
   model?: string;
   repo: RepoAccess;
   allowEdits: boolean;
-  loadProjectSettings: boolean;
+  /** Project instructions (CLAUDE.md text) added to the system prompt. Never executable settings. */
+  instructions?: string;
   log: (msg: string) => void;
   /** Ask the developer on the device (used for repository edits). */
   approve: (device: DeviceSession, title: string, detail: string) => Promise<boolean>;
@@ -33,38 +35,18 @@ export interface AgentConfig {
   onAuthError?: (reason: string) => void;
 }
 
-const CLOUD_PROVIDERS = new Set(['bedrock', 'vertex', 'foundry', 'anthropicAws', 'anthropicGoogleCloud', 'mantle']);
-/** '/login managed key' is the API key Claude Code creates when you sign in with an Anthropic Console account. */
-const API_KEY_SOURCES = new Set(['ANTHROPIC_API_KEY', 'apiKeyHelper', '/login managed key']);
-
-/**
- * The in-app agent may only run on API-billed credentials: an API key (including the
- * one created by Anthropic Console sign-in) or a cloud provider. A personal claude.ai
- * subscription login is never acceptable: Anthropic's Agent SDK terms do not allow
- * products to use it. Anything unrecognized fails closed.
- */
-export function authDecision(info: AccountInfo | undefined): { ok: boolean; source: string; reason?: string } {
-  if (!info) return { ok: false, source: 'unknown', reason: 'could not determine which credentials the agent would use' };
-  if (info.apiProvider && CLOUD_PROVIDERS.has(info.apiProvider)) return { ok: true, source: info.apiProvider };
-  if (info.apiKeySource && API_KEY_SOURCES.has(info.apiKeySource) && !info.subscriptionType) return { ok: true, source: info.apiKeySource };
-  const source = info.apiKeySource ?? info.tokenSource ?? 'unknown';
-  return {
-    ok: false,
-    source,
-    reason: `the agent would authenticate with "${source}"${info.subscriptionType ? ` (${info.subscriptionType} subscription login)` : ''}. The in-app chat only runs on an Anthropic Console sign-in, ANTHROPIC_API_KEY or Bedrock/Vertex/Foundry credentials.`,
-  };
+/** Resolves to `fallback` after `ms`, without keeping the process alive once settled. */
+function withTimeout<T, F>(p: Promise<T>, ms: number, fallback: F): Promise<T | F> {
+  let timer: NodeJS.Timeout | undefined;
+  return Promise.race([p, new Promise<F>((r) => (timer = setTimeout(() => r(fallback), ms)))]).finally(() => clearTimeout(timer));
 }
 
 /** Check credentials without sending any prompt (no model call). */
-export async function verifyAgentAuth(timeoutMs = 20_000): Promise<{ ok: boolean; source: string; reason?: string }> {
+export async function verifyAgentAuth(mode: AuthMode, timeoutMs = 20_000): Promise<{ ok: boolean; source: string; reason?: string }> {
   const idle = new AsyncQueue<SDKUserMessage>();
-  const q = query({ prompt: idle, options: { env: agentEnv(), tools: [], settingSources: [], persistSession: false } });
+  const q = query({ prompt: idle, options: { env: agentEnv(mode), settings: agentSettings(mode), tools: [], settingSources: [], persistSession: false } });
   try {
-    const info = await Promise.race([
-      q.accountInfo(),
-      new Promise<undefined>((r) => setTimeout(() => r(undefined), timeoutMs)),
-    ]);
-    return authDecision(info);
+    return authDecision(await withTimeout(q.accountInfo(), timeoutMs, undefined), mode);
   } catch (e) {
     return { ok: false, source: 'error', reason: `credential check failed: ${redactText(String((e as Error)?.message ?? e))}` };
   } finally {
@@ -189,6 +171,7 @@ export class AgentSession {
           capabilities: this.device.capabilities,
           repoRoots: this.cfg.repo.roots,
           allowEdits: this.cfg.allowEdits,
+          instructions: this.cfg.instructions,
         }),
         cwd: this.cfg.repo.roots[0] ?? mkdtempSync(join(tmpdir(), 'rnad-agent-')),
         ...(this.cfg.repo.roots.length > 1 ? { additionalDirectories: this.cfg.repo.roots.slice(1) } : {}),
@@ -199,20 +182,22 @@ export class AgentSession {
         canUseTool,
         hooks: { PreToolUse: [{ hooks: [guard] }] },
         permissionMode: 'default',
-        settingSources: this.cfg.loadProjectSettings ? ['project'] : [],
+        // Never load settings files: repo-controlled hooks, env or credential helpers could
+        // run commands or redirect the API key. CLAUDE.md text arrives via `instructions`.
+        settingSources: [],
+        settings: agentSettings(this.cfg.auth),
         includePartialMessages: true,
         persistSession: false,
         stderr: (data: string) => this.cfg.log(`[agent stderr] ${redactText(data.trim()).slice(0, 500)}`),
-        env: agentEnv(),
+        env: agentEnv(this.cfg.auth),
       },
     });
     const q = this.q;
-    this.ready = Promise.race([
-      q.accountInfo().then(authDecision),
-      new Promise<{ ok: false; source: string; reason: string }>((r) =>
-        setTimeout(() => r({ ok: false, source: 'timeout', reason: 'credential check timed out' }), 20_000),
-      ),
-    ]).catch((e: unknown) => ({ ok: false, source: 'error', reason: `credential check failed: ${redactText(String(e))}` }));
+    this.ready = withTimeout(
+      q.accountInfo().then((info) => authDecision(info, this.cfg.auth)),
+      20_000,
+      { ok: false, source: 'timeout', reason: 'credential check timed out' },
+    ).catch((e: unknown) => ({ ok: false, source: 'error', reason: `credential check failed: ${redactText(String(e))}` }));
     void this.ready.then((d) => {
       if (d.ok) {
         this.cfg.log(`agent credentials: ${'source' in d ? d.source : 'ok'}`);

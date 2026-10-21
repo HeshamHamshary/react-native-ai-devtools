@@ -1,3 +1,5 @@
+import { existsSync, readFileSync, statSync } from 'node:fs';
+import { join } from 'node:path';
 import type { DeviceInfo, CapabilityMap } from 'react-native-agent-devtools-protocol';
 
 export interface PromptOptions {
@@ -5,6 +7,29 @@ export interface PromptOptions {
   capabilities: CapabilityMap;
   repoRoots: string[];
   allowEdits: boolean;
+  /** Text of the repo's CLAUDE.md, when the developer opted in. */
+  instructions?: string;
+}
+
+const INSTRUCTION_FILES = ['CLAUDE.md', join('.claude', 'CLAUDE.md')];
+const MAX_INSTRUCTIONS = 16_000;
+
+/**
+ * Read CLAUDE.md from the repo roots as plain text. Only text: Claude Code settings
+ * files (hooks, env, credential helpers) are never loaded for the in-app agent.
+ */
+export function loadProjectInstructions(roots: string[]): string | undefined {
+  const parts: string[] = [];
+  for (const root of roots) {
+    for (const name of INSTRUCTION_FILES) {
+      const file = join(root, name);
+      if (!existsSync(file) || !statSync(file).isFile()) continue;
+      parts.push(`# ${file}\n${readFileSync(file, 'utf8').trim()}`);
+    }
+  }
+  if (!parts.length) return undefined;
+  const text = parts.join('\n\n');
+  return text.length > MAX_INSTRUCTIONS ? `${text.slice(0, MAX_INSTRUCTIONS)}\n…(truncated)` : text;
 }
 
 /** Deliberately short: every token here is paid on every turn. */
@@ -23,7 +48,11 @@ export function systemPrompt(o: PromptOptions): string {
 
 Device: ${d.appName ?? 'app'} on ${d.platform} ${d.osVersion}${d.model ? `, ${d.model}` : ''}${d.isEmulator ? ' (simulator/emulator)' : ''}, React Native ${d.rnVersion ?? '?'}, window ${Math.round(d.window.width)}x${Math.round(d.window.height)}pt.
 Capabilities: ${caps}.
-${repo}
+${repo}${
+    o.instructions
+      ? `\n\nThe repository's CLAUDE.md (the developer's notes about this codebase):\n<project_instructions>\n${o.instructions}\n</project_instructions>`
+      : ''
+  }
 
 How to work fast:
 - Each user message comes with an <app_state> snapshot captured at send time. Answer directly from it when possible; call tools only when you need more.

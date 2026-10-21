@@ -60,6 +60,8 @@ export interface ServerInfo {
     setup?: boolean;
     /** The chat goes to the developer's own Claude Code session (channel) instead of the in-app agent. */
     via?: 'claude-code';
+    /** Which credentials the in-app agent runs on (e.g. "Anthropic Console sign-in"). Never the credential itself. */
+    credentials?: string;
   };
   repoAccess: 'none' | 'read' | 'read-write';
   network: 'loopback' | 'lan';
@@ -90,7 +92,11 @@ export type ClientMessage =
 export type ChatState = 'idle' | 'thinking' | 'acting';
 
 export type ServerMessage =
-  | { type: 'welcome'; sessionId: string; deviceToken?: string; server: ServerInfo }
+  /**
+   * `trusted`: the device is paired, so it may approve code edits and Claude Code
+   * permission requests. Unpaired simulators on the dev machine can chat but not approve.
+   */
+  | { type: 'welcome'; sessionId: string; deviceToken?: string; trusted?: boolean; server: ServerInfo }
   | { type: 'auth.required'; reason: string; pairing: boolean }
   | { type: 'chat.status'; state: ChatState; turnId?: string }
   | { type: 'chat.delta'; turnId: string; text: string }
@@ -107,6 +113,8 @@ export type ServerMessage =
     }
   | { type: 'chat.done'; turnId: string; ok: boolean; error?: string; stats?: TurnStats }
   | { type: 'chat.error'; message: string; code?: string }
+  /** Informational line in the chat (does not end the turn). */
+  | { type: 'chat.notice'; text: string; level: 'info' | 'warning' }
   | { type: 'rpc.call'; id: string; method: RpcMethod; params: unknown; timeoutMs?: number }
   | { type: 'rpc.cancel'; id: string }
   | { type: 'approval.request'; id: string; title: string; detail: string; risk: 'medium' | 'high' }
@@ -210,6 +218,9 @@ export function parseServerMessage(raw: unknown): Parsed<ServerMessage> {
       if (!isStr(m.id, 64)) return { ok: false, error: 'rpc.call: invalid id' };
       if (!isRpcMethod(m.method)) return { ok: false, error: `rpc.call: unknown method ${String(m.method)}` };
       return { ok: true, msg: m as ServerMessage };
+    case 'chat.notice':
+      if (!isStr(m.text, 2_000)) return { ok: false, error: 'chat.notice: invalid text' };
+      return { ok: true, msg: { type: 'chat.notice', text: m.text, level: m.level === 'warning' ? 'warning' : 'info' } };
     case 'setup.status':
       if (m.state !== 'waiting' && m.state !== 'failed') return { ok: false, error: 'setup.status: invalid state' };
       if (m.message !== undefined && !isStr(m.message, 500)) return { ok: false, error: 'setup.status: invalid message' };

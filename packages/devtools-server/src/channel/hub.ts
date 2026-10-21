@@ -136,9 +136,9 @@ export class ChannelHub {
     turn.slowTimer = setTimeout(() => {
       if (this.turn !== turn || turn.toolCalls > 0) return;
       device.send({
-        type: 'chat.error',
-        code: 'CHANNEL_SLOW',
-        message: 'No response from Claude Code yet. Check its terminal: if it says channels are blocked by org policy, an admin needs to enable channels.',
+        type: 'chat.notice',
+        level: 'warning',
+        text: 'No response from Claude Code yet. Check its terminal: if it says channels are blocked by org policy, an admin needs to enable channels.',
       });
     }, SLOW_NOTICE_MS);
   }
@@ -193,10 +193,22 @@ export class ChannelHub {
     return out;
   }
 
-  /** Claude Code's "allow this tool?" prompt, answered on the device. The terminal prompt stays open too. */
+  /**
+   * Claude Code's "allow this tool?" prompt, answered on the device. The terminal prompt
+   * stays open too. Only a paired device may answer: anything that can reach the
+   * server's port could otherwise approve commands in the developer's session.
+   */
   private async relayPermission(msg: Extract<BridgeMessage, { type: 'permission.request' }>, send: (m: HubMessage) => void): Promise<void> {
     const device = this.turn?.device ?? this.opts.devices.active();
     if (!device) return;
+    if (!device.trusted) {
+      device.send({
+        type: 'chat.notice',
+        level: 'info',
+        text: `Claude Code is asking to use ${msg.toolName}${msg.description ? ` (${msg.description.slice(0, 200)})` : ''}. Answer in your Claude Code terminal, or pair this app to approve from here.`,
+      });
+      return;
+    }
     const detail = [msg.description, msg.inputPreview].filter(Boolean).join('\n\n').slice(0, 1_500);
     const answer = await this.opts.ask(device, `Claude Code wants to use ${msg.toolName}`, detail);
     if (answer === undefined) return;
