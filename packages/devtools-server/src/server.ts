@@ -7,6 +7,7 @@ import { claudeCodeSignIn, type SignInBackend, type SignInHandle } from './agent
 import { AgentSession, verifyAgentAuth } from './agent/AgentSession.ts';
 import { chooseAuthMode, stateDir as defaultStateDir, type AuthMode } from './agent/credentials.ts';
 import { DemoSession } from './agent/DemoSession.ts';
+import { Automation } from './automation/osInput.ts';
 import { loadProjectInstructions } from './agent/prompt.ts';
 import { ChannelChat, ChannelHub } from './channel/hub.ts';
 import { Approvals } from './security/approvals.ts';
@@ -15,6 +16,7 @@ import { RepoAccess } from './security/repoAccess.ts';
 import { bearerOk, loadServerToken } from './security/serverToken.ts';
 import { DeviceRegistry, DeviceSession, RpcError } from './transport/devices.ts';
 import { createMcpHandler } from './transport/mcpEndpoint.ts';
+import { MOBILE_TOOLS } from './tools/mobileTools.ts';
 
 export const SERVER_VERSION = '0.1.0';
 
@@ -38,6 +40,10 @@ export interface ServerOptions {
   projectInstructions?: boolean;
   /** Require pairing for every device, including simulators on this computer. */
   requirePairing?: boolean;
+  /** Use OS-level input (adb / Maestro) for taps, typing and swipes by default; never fall back. */
+  osInput?: boolean;
+  /** For tests: replace OS-level input detection. */
+  automation?: Automation;
   /** Where the server token and pairings are kept (default ~/.config/react-native-agent-devtools). */
   stateDir?: string;
   log: (line: string) => void;
@@ -165,7 +171,9 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
   const approvals = new Approvals();
   const ask = approvals.ask.bind(approvals);
   const approve = approvals.approve.bind(approvals);
-  const hub = new ChannelHub({ devices, log, ask, onChange: () => void refreshAgent() });
+  const automation = opts.automation ?? new Automation();
+  const os = { automation, prefer: opts.osInput === true };
+  const hub = new ChannelHub({ devices, log, ask, os, onChange: () => void refreshAgent() });
 
   let availability = await computeAvailability();
   const sessions = new Map<string, ChatSession>();
@@ -182,7 +190,7 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
     const conv = convOf(d);
     if (conv) conv.session = s;
   };
-  const mcp = opts.mcp ? createMcpHandler(devices, SERVER_VERSION) : undefined;
+  const mcp = opts.mcp ? createMcpHandler(devices, SERVER_VERSION, os) : undefined;
   let port = opts.port;
 
   const serverInfo = (session?: ChatSession, device?: DeviceSession): ServerInfo => {
@@ -217,6 +225,7 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
       instructions,
       log,
       approve,
+      os,
       onAuthError: (reason) => {
         if (authRejected) return;
         authRejected = reason;
@@ -304,6 +313,16 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
         devices.list().filter((d) => d.trusted).forEach((d) => d.disconnect(4004, 'pairing revoked'));
         log(`all device pairings revoked; new pairing code: ${pairing.currentCode}`);
         return json(res, 200, { ok: true });
+      }
+      if (url.pathname === '/api/tool' && req.method === 'POST') {
+        // The agent's tools, for scripts and tests: same code path as the model's calls.
+        const body = JSON.parse(await readBody(req)) as { name?: unknown; args?: Record<string, unknown>; device?: string };
+        const tool = MOBILE_TOOLS.find((t) => t.name === body.name);
+        if (!tool) return json(res, 400, { error: `unknown tool ${String(body.name)}` });
+        const device = devices.find(body.device);
+        if (!device) return json(res, 409, { error: 'no device connected' });
+        const out = await tool.run(body.args ?? {}, { device, os });
+        return json(res, 200, out);
       }
       if (url.pathname === '/api/rpc' && req.method === 'POST') {
         const body = JSON.parse(await readBody(req)) as { method?: unknown; params?: Record<string, unknown>; device?: string; timeoutMs?: number };
@@ -505,6 +524,7 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
         sessions.delete(d.id);
       }
       modelFor.delete(d.id);
+      automation.forget(d.id);
       d.close();
     });
     ws.on('error', (e) => log(`socket error: ${redactText(e.message)}`));
@@ -533,6 +553,7 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
         clearTimeout(conv.expiry);
         conv.session?.close();
       }
+      await automation.close();
       wss.clients.forEach((c) => c.terminate());
       await new Promise<void>((r) => http.close(() => r()));
     },

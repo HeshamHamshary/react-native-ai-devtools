@@ -32,6 +32,8 @@ Usage:
                                                          claude mcp add rn-agent -- npx react-native-agent-devtools-server mcp
   react-native-agent-devtools-server call <method> [json-params] [--device ios|android|<id>]
                                                          Invoke a device RPC on the connected app
+  react-native-agent-devtools-server tool <name> [json-args] [--device ios|android|<id>]
+                                                         Run one of the agent's mobile_* tools (no model)
   react-native-agent-devtools-server bench [--iterations N]
                                                          Measure device-side latency (no model)
   react-native-agent-devtools-server devices             List connected apps
@@ -47,6 +49,8 @@ Options:
                            (default: the Console sign-in from "Set up Claude", if completed)
   --lan                    Listen on all interfaces for physical devices (pairing required)
   --require-pairing        Require pairing for every device, including simulators
+  --os-input               Use OS-level input (adb, or Maestro on the iOS simulator) for taps,
+                           typing and swipes; fail instead of falling back
   --repo <path>            Let the agent read this source tree (secrets excluded). Repeatable.
   --allow-edits            Allow Edit/Write inside --repo roots, each approved on a paired device
   --project-instructions   Add the repo's CLAUDE.md to the agent's instructions (text only)
@@ -115,6 +119,7 @@ async function main() {
       'project-instructions': { type: 'boolean', default: false },
       auth: { type: 'string' },
       'require-pairing': { type: 'boolean', default: false },
+      'os-input': { type: 'boolean', default: false },
       rotate: { type: 'boolean', default: false },
       'demo-agent': { type: 'boolean', default: false },
       iterations: { type: 'string', default: '20' },
@@ -136,6 +141,18 @@ async function main() {
     const r = await rpc(port, method, raw ? JSON.parse(raw) : {});
     process.stdout.write(`${JSON.stringify(r, null, 2)}\n`);
     process.exitCode = r.ok ? 0 : 1;
+    return;
+  }
+
+  if (command === 'tool') {
+    const [name, raw] = positionals;
+    if (!name) throw new Error('usage: tool <mobile_tool_name> [json-args] [--device ios|android|<id>]');
+    const out = (await api(port, '/api/tool', { method: 'POST', body: { name, args: raw ? JSON.parse(raw) : {}, ...(deviceSelector ? { device: deviceSelector } : {}) } })) as {
+      content: { type: string; text?: string }[];
+      isError?: boolean;
+    };
+    for (const c of out.content) process.stdout.write(c.type === 'text' ? `${c.text}\n` : `[${c.type}]\n`);
+    process.exitCode = out.isError ? 1 : 0;
     return;
   }
 
@@ -261,6 +278,7 @@ async function main() {
     mcp: !values['no-mcp'],
     projectInstructions: values['project-instructions'] === true,
     requirePairing: values['require-pairing'] === true,
+    osInput: values['os-input'] === true,
     demoAgent: values['demo-agent'] === true,
     log,
   });

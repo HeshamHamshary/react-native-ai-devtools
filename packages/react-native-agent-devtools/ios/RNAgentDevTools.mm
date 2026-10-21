@@ -53,6 +53,8 @@ static void (^rejecter(RCTPromiseRejectBlock reject))(NSString *, NSString *)
       .osVersion = RNADNative.osVersion,
       .appName = RNADNative.appName,
       .bundleId = RNADNative.bundleId,
+      .simulatorUdid = RNADNative.simulatorUdid,
+      .pid = (int)NSProcessInfo.processInfo.processIdentifier,
   });
 }
 
@@ -140,6 +142,18 @@ static void (^rejecter(RCTPromiseRejectBlock reject))(NSString *, NSString *)
 {
   RNAD_GUARD(reject);
   resolve([RNADNative nativeOverlays]);
+}
+
+- (void)getRootFrame:(RCTPromiseResolveBlock)resolve reject:(RCTPromiseRejectBlock)reject
+{
+  RNAD_GUARD(reject);
+  resolve([RNADNative rootFrame]);
+}
+
+- (void)pressAlertButton:(NSString *)title resolve:(RCTPromiseResolveBlock)resolve reject:(RCTPromiseRejectBlock)reject
+{
+  RNAD_GUARD(reject);
+  resolve([RNADNative dismissAlertWithTitle:title]);
 }
 
 - (void)getStoredValue:(NSString *)key resolve:(RCTPromiseResolveBlock)resolve reject:(RCTPromiseRejectBlock)reject

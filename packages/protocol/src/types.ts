@@ -40,6 +40,10 @@ export interface DeviceInfo {
   isEmulator?: boolean;
   appName?: string;
   bundleId?: string;
+  /** iOS simulator UDID, so the server can drive the simulator with OS-level input. */
+  simulatorUdid?: string;
+  /** App process id, so the server can find the matching adb device. */
+  pid?: number;
   rnVersion?: string;
   libraryVersion: string;
   /** Logical (dp/pt) window size. */

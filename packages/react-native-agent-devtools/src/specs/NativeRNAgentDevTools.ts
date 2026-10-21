@@ -15,6 +15,10 @@ export interface Spec extends TurboModule {
     osVersion: string;
     appName: string;
     bundleId: string;
+    /** iOS simulator UDID ('' on devices and Android): lets the server find the simulator for OS-level input. */
+    simulatorUdid: string;
+    /** Process id: lets the server match this app to an adb device. */
+    pid: CodegenTypes.Int32;
   };
 
   /** Safe-area insets of the key window, in points/dp. */
@@ -97,6 +101,21 @@ export interface Spec extends TurboModule {
 
   /** Native-only UI the React tree cannot see (system alerts / dialogs). */
   getNativeOverlays(): Promise<CodegenTypes.UnsafeObject>;
+
+  /**
+   * Where the app's root view is on the device screen, for OS-level input:
+   * `{ x, y, width, height, scale, unit }` in physical pixels on Android (`unit: 'px'`)
+   * and points on iOS (`unit: 'pt'`).
+   */
+  getRootFrame(): Promise<CodegenTypes.UnsafeObject>;
+
+  /**
+   * Press a button of the topmost native dialog by its title. Android: performClick on
+   * the dialog button (`mode: 'native'`). iOS has no public API to trigger an alert
+   * action, so it only dismisses the alert (`dismissed: true`); the JS side then calls
+   * the matching Alert.alert callback (`mode: 'semantic'`).
+   */
+  pressAlertButton(title: string): Promise<CodegenTypes.UnsafeObject>;
 
   /**
    * The tool's own small private values (the device's pairing token): Keychain

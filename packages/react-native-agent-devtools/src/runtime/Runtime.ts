@@ -1,4 +1,4 @@
-import { Appearance, Dimensions, Keyboard, Platform, StyleSheet, TextInput, findNodeHandle } from 'react-native';
+import { Appearance, Dimensions, Keyboard, LogBox, Platform, StyleSheet, TextInput, findNodeHandle } from 'react-native';
 import type {
   ChatState,
   ClientMessage,
@@ -15,6 +15,7 @@ import type {
   TurnStats,
 } from 'react-native-agent-devtools-protocol';
 import { PROTOCOL_VERSION, parseTarget, validateAction, validateSequence } from 'react-native-agent-devtools-protocol';
+import { AlertTracker } from '../collectors/AlertTracker';
 import { LogCollector } from '../collectors/LogCollector';
 import { NavigationTracker, type NavigationRefLike } from '../collectors/NavigationTracker';
 import { NetworkCollector, type NetworkOptions } from '../collectors/NetworkCollector';
@@ -132,6 +133,7 @@ export class Runtime {
   readonly logs: LogCollector;
   readonly network: NetworkCollector;
   readonly nav = new NavigationTracker();
+  readonly alerts = new AlertTracker();
   readonly inspector: Inspector;
   readonly executor: Executor;
   private conn?: Connection;
@@ -213,6 +215,7 @@ export class Runtime {
   start(): void {
     this.logs.install();
     this.network.install();
+    this.alerts.install();
     this.nav.attach(this.opts.navigationRef);
     // A paired device keeps its token across reloads and restarts (Keychain / app-private prefs),
     // and its install id so a reload resumes the same conversation.
@@ -246,6 +249,7 @@ export class Runtime {
     this.conn = undefined;
     this.logs.uninstall();
     this.network.uninstall();
+    this.alerts.uninstall();
     this.nav.detach();
     this.inflight.forEach((c) => c.abort());
     this.inflight.clear();
@@ -353,6 +357,8 @@ export class Runtime {
       window: { width: w.width, height: w.height, scale: w.scale, fontScale: w.fontScale },
       colorScheme: ((s) => (s === 'light' || s === 'dark' ? s : null))(Appearance.getColorScheme()),
       ...(c ? { model: c.model, isEmulator: c.isEmulator, appName: c.appName, bundleId: c.bundleId } : {}),
+      ...(c?.simulatorUdid ? { simulatorUdid: c.simulatorUdid } : {}),
+      ...(typeof c?.pid === 'number' && c.pid > 0 ? { pid: c.pid } : {}),
       ...(rn ? { rnVersion: `${rn.major}.${rn.minor}.${rn.patch}` } : {}),
     };
   }
@@ -862,7 +868,75 @@ export class Runtime {
       } catch {
         overlays = [];
       }
-      return { current: this.nav.current, history: this.nav.history.toArray(undefined, 20), nativeOverlays: overlays };
+      if (!overlays.length) this.alerts.current = undefined; // dismissed outside our wrapper
+      const alert = this.alerts.current;
+      return {
+        current: this.nav.current,
+        history: this.nav.history.toArray(undefined, 20),
+        nativeOverlays: overlays,
+        ...(alert ? { alert: { title: alert.title, message: alert.message, buttons: alert.buttons.map((b) => ({ text: b.text, style: b.style })) } } : {}),
+      };
+    },
+    prepareExternal: async (p, signal) => {
+      const action = typeof p.action === 'string' ? p.action : 'tap';
+      const target = p.target === undefined ? undefined : this.target(p);
+      const prepared = await this.executor.prepareExternal(action, target, signal);
+      let frame;
+      try {
+        frame = nativeAvailable ? await native.getRootFrame() : undefined;
+      } catch {
+        frame = undefined;
+      }
+      return { ...prepared, ...(frame ? { frame } : {}), window: Dimensions.get('window') };
+    },
+    finishExternal: async (p, signal) => {
+      if (typeof p.token !== 'string') throw new ToolFailure('INVALID', 'token required');
+      return this.executor.finishExternal(p.token, { ok: p.ok !== false, error: typeof p.error === 'string' ? p.error : undefined, backend: String(p.backend ?? 'os') }, signal);
+    },
+    dismissKeyboard: async (_p, signal) =>
+      this.executor.run(
+        'dismissKeyboard',
+        async () => {
+          const was = typeof Keyboard.isVisible === 'function' ? Keyboard.isVisible() : undefined;
+          Keyboard.dismiss();
+          return { mode: 'semantic', ...(was === false ? { warnings: ['the keyboard was not visible'] } : {}) };
+        },
+        signal,
+      ),
+    dismissLogBox: async (_p, signal) =>
+      this.executor.run(
+        'dismissLogBox',
+        async () => {
+          // Public LogBox API; the errors stay in getLogs.
+          LogBox.clearAllLogs();
+          return { mode: 'semantic', detail: { note: 'LogBox notifications and the error screen were cleared; the errors are still available in mobile_get_logs.' } };
+        },
+        signal,
+      ),
+    pressAlertButton: async (p, signal) => {
+      const title = typeof p.title === 'string' ? p.title : '';
+      if (!title) throw new ToolFailure('INVALID', 'title (the button text) is required');
+      return this.executor.run(
+        'pressAlertButton',
+        async () => {
+          await this.executor.confirmIfSensitive(title, 'press the alert button');
+          if (Platform.OS === 'android' && nativeAvailable) {
+            const r = await native.pressAlertButton(title);
+            if (r.pressed) return { mode: 'native', detail: { button: title } };
+          }
+          const alert = this.alerts.current;
+          const button = alert?.buttons.find((b) => b.text.toLowerCase() === title.toLowerCase());
+          if (!alert || !button) {
+            const available = alert ? alert.buttons.map((b) => `"${b.text}"`).join(', ') : 'none (no Alert.alert dialog is open)';
+            throw new ToolFailure('NOT_FOUND', `No alert button "${title}". Buttons: ${available}.`);
+          }
+          if (nativeAvailable) await native.pressAlertButton(title).catch(() => undefined);
+          button.onPress?.();
+          if (this.alerts.current === alert) this.alerts.current = undefined;
+          return { mode: 'semantic', detail: { button: button.text, note: 'Dismissed the native alert and called its button callback (no public API delivers a real tap to an iOS alert; use mode os for that).' } };
+        },
+        signal,
+      );
     },
     getPerf: async () => this.perfSummary(),
   };

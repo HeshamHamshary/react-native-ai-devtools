@@ -53,6 +53,36 @@ public final class RNADNative: NSObject {
 
   @objc public static var bundleId: String { Bundle.main.bundleIdentifier ?? "" }
 
+  /// The simulator's UDID (simulators only); used by the server to drive it with OS-level input.
+  @objc public static var simulatorUdid: String {
+    #if targetEnvironment(simulator)
+    return ProcessInfo.processInfo.environment["SIMULATOR_UDID"] ?? ""
+    #else
+    return ""
+    #endif
+  }
+
+  /// The key window's frame in screen points (the React root fills it).
+  @objc public static func rootFrame() -> [String: Any] {
+    let window = appWindows().first(where: { $0.isKeyWindow }) ?? appWindows().first
+    let f = window?.frame ?? UIScreen.main.bounds
+    return ["x": f.origin.x, "y": f.origin.y, "width": f.size.width, "height": f.size.height, "scale": window?.screen.scale ?? UIScreen.main.scale, "unit": "pt"]
+  }
+
+  /// UIKit has no public way to trigger a UIAlertAction, so this only dismisses the
+  /// alert; the JS side then calls the matching Alert.alert callback (semantic).
+  @objc public static func dismissAlert(withTitle title: String) -> [String: Any] {
+    for w in appWindows() {
+      var vc = w.rootViewController
+      while let presented = vc?.presentedViewController { vc = presented }
+      guard let alert = vc as? UIAlertController else { continue }
+      let found = alert.actions.contains { ($0.title ?? "").caseInsensitiveCompare(title) == .orderedSame }
+      alert.dismiss(animated: false)
+      return ["dismissed": true, "found": found, "mode": "semantic"]
+    }
+    return ["dismissed": false, "found": false]
+  }
+
   // MARK: - Private storage (pairing token)
 
   private static let keychainService = "react-native-agent-devtools"

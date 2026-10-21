@@ -297,3 +297,42 @@ describe('collectors', () => {
 it('fixtures sanity: text helper produces host text', () => {
   expect(text('x').tag).toBe(6);
 });
+
+describe('OS-level (external) actions', () => {
+  it('prepares like an in-app tap, hides the overlay until finished, and reports os-injected', async () => {
+    const btn = pressable('Log in', r(20, 400, 200, 40), { testID: 'go' });
+    const overlay: boolean[] = [];
+    const { exec } = setup(() => root([btn.fiber]), { setOverlayHidden: (h) => overlay.push(h) });
+    const prep = await exec.prepareExternal('tap', { testID: 'go' });
+    expect(prep.point).toEqual({ x: 120, y: 420 });
+    expect(prep.target).toMatchObject({ label: 'Log in' });
+    expect(overlay.at(-1)).toBe(true);
+    const res = await exec.finishExternal(prep.token, { ok: true, backend: 'adb' });
+    expect(res).toMatchObject({ ok: true, action: 'tap', mode: 'os-injected', detail: { backend: 'adb' } });
+    expect(overlay.at(-1)).toBe(false);
+    expect(btn.calls).toEqual([]); // the app's handler was not called by us
+    await expect(exec.finishExternal(prep.token, { ok: true, backend: 'adb' })).rejects.toThrow(/expired/);
+  });
+
+  it('refuses a covered target before any OS input, and reports OS failures as failures', async () => {
+    const covered = pressable('Promo', r(20, 300), { testID: 'promo' });
+    const cover = host('RCTView', { testID: 'cover' }, [], r(20, 300));
+    const { exec } = setup(() => root([host('RCTView', {}, [covered.fiber, cover])]), { probe: { hit: (t) => (t === tagOf(covered.view) ? tagOf(cover) : t) } });
+    await expect(exec.prepareExternal('tap', { testID: 'promo' })).rejects.toThrow(/covered by View #cover/);
+
+    const ok = pressable('OK', r(20, 500), { testID: 'ok' });
+    const { exec: e2 } = setup(() => root([ok.fiber]));
+    const prep = await e2.prepareExternal('tap', { testID: 'ok' });
+    const failed = await e2.finishExternal(prep.token, { ok: false, error: 'device offline', backend: 'maestro' });
+    expect(failed.ok).toBe(false);
+    expect(failed.error?.message).toMatch(/maestro.*device offline/);
+  });
+
+  it('does not treat repeated taps on a toggle as a duplicate submission', async () => {
+    const sw = host('RCTSwitch', { testID: 'login-remember', value: true, onChange: () => {} }, [], r(300, 375, 63, 28));
+    const { exec } = setup(() => root([comp('Switch', { onValueChange: () => {} }, [sw])]));
+    const a = await exec.prepareExternal('tap', { testID: 'login-remember' });
+    await exec.finishExternal(a.token, { ok: true, backend: 'adb' });
+    await expect(exec.prepareExternal('tap', { testID: 'login-remember' })).resolves.toMatchObject({ target: { role: 'switch' } });
+  });
+});

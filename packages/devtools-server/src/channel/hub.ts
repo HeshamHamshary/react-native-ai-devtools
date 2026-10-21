@@ -2,7 +2,7 @@ import type { WebSocket } from 'ws';
 import type { TurnStats } from 'react-native-agent-devtools-protocol';
 import { appStateBlock, selectionBlock } from '../agent/prompt.ts';
 import { toolDetail } from '../tools/format.ts';
-import { MOBILE_TOOLS, type ToolOutput } from '../tools/mobileTools.ts';
+import { MOBILE_TOOLS, type ToolContext, type ToolOutput } from '../tools/mobileTools.ts';
 import type { DeviceRegistry, DeviceSession } from '../transport/devices.ts';
 import { parseBridgeMessage, type BridgeMessage, type HubMessage } from './messages.ts';
 
@@ -28,6 +28,8 @@ export interface ChannelHubOptions {
   ask: (device: DeviceSession, title: string, detail: string) => Promise<boolean | undefined>;
   /** The chat bridge connected or went away. */
   onChange: () => void;
+  /** OS-level input for the mobile tools. */
+  os?: ToolContext['os'];
 }
 
 const errorOutput = (text: string): ToolOutput => ({ content: [{ type: 'text', text }], isError: true });
@@ -181,6 +183,7 @@ export class ChannelHub {
     }
     const out = await tool.run(msg.args, {
       device,
+      ...(this.opts.os ? { os: this.opts.os } : {}),
       onRpc: (_m, r) => {
         if (turn) turn.deviceMs += r.deviceMs;
       },

@@ -79,6 +79,8 @@ class RNAgentDevToolsModule(reactContext: ReactApplicationContext) :
       "osVersion" to Build.VERSION.RELEASE,
       "appName" to label,
       "bundleId" to ctx.packageName,
+      "simulatorUdid" to "",
+      "pid" to android.os.Process.myPid(),
     )
   }
 
@@ -566,6 +568,53 @@ class RNAgentDevToolsModule(reactContext: ReactApplicationContext) :
     val result = Arguments.createMap()
     result.putArray("overlays", overlays)
     promise.resolve(result)
+  }
+
+  // ---- OS-level input support -------------------------------------------------------
+
+  override fun getRootFrame(promise: Promise) = onUi(promise) {
+    val activity = reactApplicationContext.currentActivity ?: throw IllegalStateException("No current activity")
+    val content = activity.findViewById<ViewGroup>(android.R.id.content)
+    val root = content.getChildAt(0) ?: content
+    val loc = IntArray(2)
+    root.getLocationOnScreen(loc)
+    promise.resolve(Arguments.createMap().apply {
+      putDouble("x", loc[0].toDouble())
+      putDouble("y", loc[1].toDouble())
+      putDouble("width", root.width.toDouble())
+      putDouble("height", root.height.toDouble())
+      putDouble("scale", density.toDouble())
+      putString("unit", "px")
+    })
+  }
+
+  /** performClick on a button of the topmost showing dialog: the dialog's own click path. */
+  override fun pressAlertButton(title: String, promise: Promise) = onUi(promise) {
+    val activity: Activity? = reactApplicationContext.currentActivity
+    var pressed = false
+    if (activity is FragmentActivity) {
+      for (f in activity.supportFragmentManager.fragments.reversed()) {
+        val dialog = (f as? DialogFragment)?.dialog ?: continue
+        if (!dialog.isShowing) continue
+        for (which in listOf(DialogInterface.BUTTON_POSITIVE, DialogInterface.BUTTON_NEGATIVE, DialogInterface.BUTTON_NEUTRAL)) {
+          val button = when (dialog) {
+            is AlertDialog -> dialog.getButton(which)
+            is androidx.appcompat.app.AlertDialog -> dialog.getButton(which)
+            else -> null
+          } ?: continue
+          if (button.visibility == View.VISIBLE && button.text.toString().equals(title, ignoreCase = true)) {
+            pressed = button.performClick()
+            break
+          }
+        }
+        if (pressed) break
+      }
+    }
+    promise.resolve(Arguments.createMap().apply {
+      putBoolean("pressed", pressed)
+      putBoolean("found", pressed)
+      putString("mode", "native")
+    })
   }
 
   // ---- Private storage (pairing token) ----------------------------------------------

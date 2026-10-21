@@ -103,6 +103,10 @@ export const native = {
     const r = (await need().getNativeOverlays()) as { overlays?: NativeOverlay[] };
     return r.overlays ?? [];
   },
+  getRootFrame: async (): Promise<{ x: number; y: number; width: number; height: number; scale: number; unit: 'px' | 'pt' }> =>
+    (await need().getRootFrame()) as { x: number; y: number; width: number; height: number; scale: number; unit: 'px' | 'pt' },
+  pressAlertButton: async (title: string): Promise<{ pressed?: boolean; dismissed?: boolean; mode?: string; found?: boolean }> =>
+    (await need().pressAlertButton(title)) as { pressed?: boolean; dismissed?: boolean; mode?: string; found?: boolean },
   getStoredValue: async (key: string): Promise<string | undefined> => {
     if (!mod) return undefined;
     const r = (await mod.getStoredValue(key)) as { value?: string };

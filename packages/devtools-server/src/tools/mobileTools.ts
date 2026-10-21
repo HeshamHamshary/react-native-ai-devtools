@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import type { ActionResult, LogEntry, NetworkEntry, RpcMethod, ScreenshotResult } from 'react-native-agent-devtools-protocol';
+import type { Automation, OsInput, Point } from '../automation/osInput.ts';
 import type { DeviceSession, RpcResult } from '../transport/devices.ts';
 import { RpcError } from '../transport/devices.ts';
 import { formatAction, formatLogs, formatNetwork, formatSequence, type SequenceResult } from './format.ts';
@@ -16,6 +17,8 @@ export interface ToolOutput {
 
 export interface ToolContext {
   device: DeviceSession | undefined;
+  /** OS-level input (adb / Maestro). `prefer`: use it by default for taps, typing and swipes. */
+  os?: { automation: Automation; prefer: boolean };
   signal?: AbortSignal;
   /** Called with device-side timing for per-turn performance stats. */
   onRpc?: (method: RpcMethod, r: RpcResult) => void;
@@ -58,6 +61,54 @@ async function guarded(fn: () => Promise<ToolOutput>): Promise<ToolOutput> {
 }
 
 const action = (r: ActionResult): ToolOutput => text(formatAction(r), !r.ok);
+
+interface Frame {
+  x: number;
+  y: number;
+  scale: number;
+  unit: 'px' | 'pt';
+}
+
+/** Window points (what snapshots use) to the backend's screen coordinates. */
+export function toScreen(p: Point, frame: Frame | undefined, unit: 'px' | 'pt'): Point {
+  if (!frame) {
+    if (unit === 'pt') return p;
+    throw new RpcError('UNSUPPORTED', 'The app did not report its screen frame (rebuild the app to use OS-level input).');
+  }
+  const origin = frame.unit === unit ? { x: frame.x, y: frame.y } : unit === 'px' ? { x: frame.x * frame.scale, y: frame.y * frame.scale } : { x: frame.x / frame.scale, y: frame.y / frame.scale };
+  const k = unit === 'px' ? frame.scale : 1;
+  return { x: origin.x + p.x * k, y: origin.y + p.y * k };
+}
+
+/**
+ * Perform an action with OS-level input: the device resolves and checks the target
+ * and records a baseline, the OS automation backend injects the input, and the device
+ * reports what changed (mode os-injected). Never falls back to another mode.
+ */
+async function osAct(
+  ctx: ToolContext,
+  name: string,
+  target: unknown,
+  perform: (input: OsInput, at: Point | undefined, screen: (p: Point) => Point) => Promise<void>,
+): Promise<ToolOutput> {
+  if (!ctx.device) throw new RpcError('NO_DEVICE', 'No app is connected. Open the app with react-native-agent-devtools enabled.');
+  if (!ctx.os) return text('✗ UNSUPPORTED: OS-level input is not available on this server. No other interaction mode was used.', true);
+  const { input, reason } = await ctx.os.automation.for(ctx.device.id, ctx.device.info);
+  if (!input) return text(`✗ UNSUPPORTED: no OS-level input for this device: ${reason}. No other interaction mode was used.`, true);
+  const prep = await call<{ token: string; point?: Point; frame?: Frame }>(ctx, 'prepareExternal', { action: name, ...(typeof target === 'string' ? { target } : {}) });
+  const screen = (p: Point) => toScreen(p, prep.frame, input.unit);
+  let ok = true;
+  let error: string | undefined;
+  try {
+    await perform(input, prep.point ? screen(prep.point) : undefined, screen);
+  } catch (e) {
+    ok = false;
+    error = e instanceof Error ? e.message : String(e);
+  }
+  return action(await call<ActionResult>(ctx, 'finishExternal', { token: prep.token, ok, ...(error ? { error } : {}), backend: input.name }, 30_000));
+}
+
+const wantsOs = (ctx: ToolContext, mode: unknown) => mode === 'os' || (mode === undefined && ctx.os?.prefer === true);
 
 const quote = (v: unknown) => (typeof v === 'string' ? (v.length > 30 ? `${v.slice(0, 29)}…` : v) : '');
 
@@ -126,24 +177,26 @@ export const MOBILE_TOOLS: MobileTool[] = [
     name: 'mobile_tap',
     kind: 'control',
     description:
-      'Tap an element. The device verifies a real touch at the element center would reach it (refuses with NOT_HITTABLE if covered), scrolls it into view if needed, performs the tap and waits for the UI to settle, then reports what changed (route change, new elements, JS errors, failed requests). The result states the interaction mode actually used: Android uses synthesized touch events through the real view hierarchy; iOS uses a semantic press (no public in-process touch API) verified by native hit-testing.',
+      'Tap an element. The device verifies a real touch at the element center would reach it (refuses with NOT_HITTABLE if covered), scrolls it into view if needed, performs the tap and waits for the UI to settle, then reports what changed (route change, new elements, JS errors, failed requests). The result states the interaction mode actually used: Android uses synthesized touch events through the real view hierarchy; iOS uses a semantic press (no public in-process touch API) verified by native hit-testing. mode "os" injects a real touch through the OS (adb on Android, XCUITest via Maestro on the iOS simulator), slower but exercising gesture handling exactly like a finger; use it to test gesture behavior.',
     shape: {
       target,
       mode: z
-        .enum(['auto', 'semantic', 'touch'])
+        .enum(['auto', 'semantic', 'touch', 'os'])
         .optional()
-        .describe('auto (default). semantic = call the JS handler even if covered. touch = require real touch synthesis (Android only)'),
+        .describe('auto (default). semantic = call the JS handler even if covered. touch = in-app touch synthesis (Android). os = real OS-level touch (fails if unavailable; never falls back)'),
       long: z.boolean().optional().describe('Long press instead of tap'),
     },
-    summary: (a) => `${a.long ? 'Long-press' : 'Tap'} ${quote(a.target)}`,
+    summary: (a) => `${a.long ? 'Long-press' : 'Tap'} ${quote(a.target)}${a.mode === 'os' ? ' (OS)' : ''}`,
     run: (a, ctx) =>
       guarded(async () =>
-        action(
-          await call<ActionResult>(ctx, a.long ? 'longPress' : 'tap', {
-            target: a.target,
-            ...(a.mode ? { mode: a.mode } : {}),
-          }),
-        ),
+        wantsOs(ctx, a.mode)
+          ? osAct(ctx, a.long ? 'longPress' : 'tap', a.target, (input, at) => (a.long ? input.longPress(at!, 800) : input.tap(at!)))
+          : action(
+              await call<ActionResult>(ctx, a.long ? 'longPress' : 'tap', {
+                target: a.target,
+                ...(a.mode ? { mode: a.mode } : {}),
+              }),
+            ),
       ),
   },
   {
@@ -156,12 +209,21 @@ export const MOBILE_TOOLS: MobileTool[] = [
       text: z.string().max(2000),
       replace: z.boolean().optional().describe('Replace existing text (default true); false appends at the cursor'),
       submit: z.boolean().optional(),
+      mode: z.enum(['auto', 'os']).optional().describe('os = tap the field and type key by key through the OS keyboard (onKeyPress fires per key); slower'),
     },
-    summary: (a) => `Type into ${quote(a.target)}`,
+    summary: (a) => `Type into ${quote(a.target)}${a.mode === 'os' ? ' (OS)' : ''}`,
     run: (a, ctx) =>
-      guarded(async () =>
-        action(await call<ActionResult>(ctx, 'typeText', { target: a.target, text: a.text, replace: a.replace !== false, submit: a.submit === true })),
-      ),
+      guarded(async () => {
+        if (wantsOs(ctx, a.mode)) {
+          if (a.replace !== false) await call<ActionResult>(ctx, 'clearText', { target: a.target });
+          return osAct(ctx, 'type', a.target, async (input, at) => {
+            await input.tap(at!);
+            if (a.text) await input.typeText(String(a.text));
+            if (a.submit === true) await input.pressKey('enter');
+          });
+        }
+        return action(await call<ActionResult>(ctx, 'typeText', { target: a.target, text: a.text, replace: a.replace !== false, submit: a.submit === true }));
+      }),
   },
   {
     name: 'mobile_scroll',
@@ -195,25 +257,28 @@ export const MOBILE_TOOLS: MobileTool[] = [
   {
     name: 'mobile_swipe',
     kind: 'control',
-    description: 'Swipe gesture between two points in window coordinates (points). Android only (synthesized touch); unsupported on iOS without an OS-level backend.',
+    description:
+      'Swipe gesture between two points in window coordinates (points). Android: synthesized touch by default; iOS needs OS-level input (used automatically when available, reported as os-injected). mode "os" forces OS-level input on both.',
     shape: {
       from_x: z.number(),
       from_y: z.number(),
       to_x: z.number(),
       to_y: z.number(),
       duration_ms: z.number().int().min(50).max(2000).optional(),
+      mode: z.enum(['auto', 'os']).optional(),
     },
-    summary: () => 'Swipe',
+    summary: (a) => `Swipe${a.mode === 'os' ? ' (OS)' : ''}`,
     run: (a, ctx) =>
-      guarded(async () =>
-        action(
-          await call<ActionResult>(ctx, 'swipe', {
-            from: { x: a.from_x, y: a.from_y },
-            to: { x: a.to_x, y: a.to_y },
-            durationMs: a.duration_ms ?? 300,
-          }),
-        ),
-      ),
+      guarded(async () => {
+        const ms = typeof a.duration_ms === 'number' ? a.duration_ms : 300;
+        const from = { x: Number(a.from_x), y: Number(a.from_y) };
+        const to = { x: Number(a.to_x), y: Number(a.to_y) };
+        // In-process swipes are impossible on iOS: OS-level input is the only real option there.
+        if (wantsOs(ctx, a.mode) || (a.mode !== 'auto' && ctx.device?.info.platform === 'ios' && ctx.os)) {
+          return osAct(ctx, 'swipe', undefined, (input, _at, screen) => input.swipe(screen(from), screen(to), ms));
+        }
+        return action(await call<ActionResult>(ctx, 'swipe', { from, to, durationMs: ms }));
+      }),
   },
   {
     name: 'mobile_wait_for',
@@ -348,9 +413,67 @@ export const MOBILE_TOOLS: MobileTool[] = [
       }),
   },
   {
+    name: 'mobile_alert',
+    kind: 'control',
+    description:
+      'Answer the open native alert (Alert.alert) by pressing one of its buttons. Android presses the real dialog button (native). iOS has no public API for that: auto dismisses the alert and calls the button callback (semantic); mode "os" taps the button through XCUITest (os-injected). mobile_get_navigation lists the open alert and its buttons.',
+    shape: { button: z.string().min(1).describe('Button text, e.g. "OK" or "Cancel"'), mode: z.enum(['auto', 'os']).optional() },
+    summary: (a) => `Press alert button ${quote(a.button)}`,
+    run: (a, ctx) =>
+      guarded(async () =>
+        wantsOs(ctx, a.mode)
+          ? osAct(ctx, 'alert', undefined, async (input) => {
+              if (!input.tapText) throw new Error(`${input.name} cannot tap by text`);
+              await input.tapText(String(a.button));
+            })
+          : action(await call<ActionResult>(ctx, 'pressAlertButton', { title: a.button })),
+      ),
+  },
+  {
+    name: 'mobile_dismiss_keyboard',
+    kind: 'control',
+    description: 'Hide the on-screen keyboard (Keyboard.dismiss(), semantic). Useful when the keyboard covers the element you need.',
+    shape: {},
+    summary: () => 'Dismiss keyboard',
+    run: (_a, ctx) => guarded(async () => action(await call<ActionResult>(ctx, 'dismissKeyboard', {}))),
+  },
+  {
+    name: 'mobile_dismiss_logbox',
+    kind: 'control',
+    description:
+      'Clear React Native LogBox notifications and the red error screen (LogBox.clearAllLogs()) when they cover the app. The errors stay available in mobile_get_logs. Look at them first: they are often the bug.',
+    shape: {},
+    summary: () => 'Dismiss LogBox',
+    run: (_a, ctx) => guarded(async () => action(await call<ActionResult>(ctx, 'dismissLogBox', {}))),
+  },
+  {
+    name: 'mobile_native_logs',
+    kind: 'read',
+    description:
+      "Native log lines of the app's own process, read on the developer's computer: adb logcat for the app's pid (Android), the simulator's unified log (iOS). Use for native crashes, native module errors and OS warnings that never reach JS. Redacted; physical iPhones are not supported.",
+    shape: {
+      errors_only: z.boolean().optional().describe('Only warnings/errors (default true)'),
+      seconds: z.number().int().min(5).max(600).optional().describe('How far back (default 120)'),
+      limit: z.number().int().min(5).max(200).optional(),
+    },
+    summary: () => 'Read native logs',
+    run: (a, ctx) =>
+      guarded(async () => {
+        if (!ctx.device) throw new RpcError('NO_DEVICE', 'No app is connected.');
+        if (!ctx.os) return text('Native logs are not available on this server.', true);
+        const r = await ctx.os.automation.nativeLogs(ctx.device.info, {
+          errorsOnly: a.errors_only !== false,
+          seconds: typeof a.seconds === 'number' ? a.seconds : 120,
+          limit: typeof a.limit === 'number' ? a.limit : 60,
+        });
+        if (r.reason) return text(`Native logs unavailable: ${r.reason}`, true);
+        return text(r.lines.length ? `${r.lines.length} line(s) from ${r.source}:\n${r.lines.join('\n')}` : `No ${a.errors_only === false ? '' : 'warning/error '}lines from ${r.source} in that window.`);
+      }),
+  },
+  {
     name: 'mobile_get_navigation',
     kind: 'read',
-    description: 'Current route, recent navigation history, and native alerts/dialogs that are not part of the React tree.',
+    description: 'Current route, recent navigation history, native alerts/dialogs that are not part of the React tree, and the open Alert.alert with its buttons.',
     shape: {},
     summary: () => 'Read navigation',
     run: (_a, ctx) => guarded(async () => text(JSON.stringify(await call(ctx, 'getNavigation', {}), null, 1))),

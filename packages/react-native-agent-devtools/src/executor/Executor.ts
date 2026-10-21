@@ -55,6 +55,25 @@ export interface ExecutorDeps {
   confirmSensitive: boolean;
 }
 
+interface Baseline {
+  t0: number;
+  startedTs: number;
+  logId: number;
+  netId: number;
+  before?: Snapshot;
+}
+
+interface ActionOutcome {
+  el?: InternalElement;
+  mode?: InteractionMode;
+  warnings?: string[];
+  detail?: Record<string, unknown>;
+  reResolved?: boolean;
+  skipSettle?: boolean;
+  /** Typing rarely navigates: only wait for React to go quiet, not for animations. */
+  lightSettle?: boolean;
+}
+
 export interface PerfSample {
   op: string;
   ms: number;
@@ -64,6 +83,16 @@ export interface PerfSample {
 const SENSITIVE =
   /\b(delete|remove|pay( now)?|purchase|buy|checkout|place order|confirm (booking|payment|purchase|order)|book now|transfer|send money|submit (order|payment)|cancel (booking|subscription|order|trip|reservation)|unsubscribe|deactivate|close account|reset (account|password))\b/i;
 const SUBMIT_LIKE = /\b(submit|log ?in|sign ?in|sign ?up|register|pay|book|confirm|send|save|place order|checkout|purchase)\b/i;
+
+function describeState(e: InternalElement): string {
+  const parts: string[] = [];
+  if (e.value !== undefined) parts.push(`value=${e.value === true ? 'on' : e.value === false ? 'off' : String(e.value)}`);
+  if (e.checked !== undefined) parts.push(`checked=${String(e.checked)}`);
+  if (e.selected !== undefined) parts.push(`selected=${String(e.selected)}`);
+  if (e.expanded !== undefined) parts.push(e.expanded ? 'expanded' : 'collapsed');
+  if (!e.enabled) parts.push('disabled');
+  return parts.join(' ') || 'default';
+}
 
 function errCode(e: unknown): ErrorCode {
   if (e instanceof ToolFailure) return e.code;
@@ -113,6 +142,15 @@ export class Executor {
     return { ref: el.ref, role: el.role, ...(el.label ? { label: el.label } : {}), ...(el.testID ? { testID: el.testID } : {}) };
   }
 
+  /** Ask on the device before an action whose label looks destructive or consequential. */
+  async confirmIfSensitive(label: string, verb: string): Promise<void> {
+    if (!this.d.confirmSensitive) return;
+    const looks = this.d.isSensitive ? this.d.isSensitive({ role: 'button', label }) : SENSITIVE.test(label);
+    if (!looks) return;
+    const ok = await this.d.confirm({ title: 'Allow this action?', detail: `The agent wants to ${verb} "${label}". This looks like a destructive or externally consequential action.` });
+    if (!ok) throw new ToolFailure('DENIED', `The user declined: ${verb} "${label}". Do not retry; ask the user how to proceed.`);
+  }
+
   private sensitive(el: InternalElement): boolean {
     const probe = { role: el.role, label: el.label, text: el.text, testID: el.testID };
     if (this.d.isSensitive) return this.d.isSensitive(probe);
@@ -129,8 +167,10 @@ export class Executor {
   }
 
   private guardDuplicate(el: InternalElement, snap: Snapshot): void {
+    // Toggles legitimately get tapped twice; only submit-like buttons and links are guarded.
+    if (el.role !== 'button' && el.role !== 'link') return;
     const prev = this.lastTap;
-    const label = `${el.label ?? ''} ${el.testID ?? ''}`;
+    const label = el.label || el.text || el.testID || '';
     if (
       prev &&
       prev.fingerprint === el.fingerprint &&
@@ -217,71 +257,150 @@ export class Executor {
   }
 
   /** Common wrapper: timing, settle, change report, structured errors. Never throws. */
-  private async act(
-    action: string,
-    signal: AbortSignal | undefined,
-    body: (snap: Snapshot) => Promise<{
-      el?: InternalElement;
-      mode?: InteractionMode;
-      warnings?: string[];
-      detail?: Record<string, unknown>;
-      reResolved?: boolean;
-      skipSettle?: boolean;
-      /** Typing rarely navigates: only wait for React to go quiet, not for animations. */
-      lightSettle?: boolean;
-    }>,
-  ): Promise<ActionResult> {
-    const t0 = clock();
-    const startedTs = Date.now();
-    const logId = this.d.logs.lastId;
-    const netId = this.d.network.lastId;
-    let before: Snapshot | undefined;
+  private async act(action: string, signal: AbortSignal | undefined, body: (snap: Snapshot) => Promise<ActionOutcome>): Promise<ActionResult> {
+    const base = this.begin();
     try {
-      before = await this.snapshot();
-      const r = await body(before);
-      const result: ActionResult = {
-        ok: true,
-        action,
-        durationMs: 0,
-        ...(r.el ? { target: this.targetInfo(r.el) } : {}),
-        ...(r.mode ? { mode: r.mode } : {}),
-        ...(r.reResolved ? { reResolved: true } : {}),
-        ...(r.warnings?.length ? { warnings: r.warnings } : {}),
-      };
-      const detail: Record<string, unknown> = { ...(r.detail ?? {}) };
-      if (!r.skipSettle) {
-        const { snap: after, settled } = r.lightSettle ? await this.lightSettle(signal) : await this.settle(startedTs, signal);
-        const { errors, failed, ...changes } = this.changes(before, after, logId, netId);
-        result.settled = settled;
-        result.changes = changes;
-        if (errors.length) detail.newErrors = errors;
-        if (failed.length) detail.failedRequests = failed;
-        const routeChanged = changes.routeBefore !== changes.routeAfter;
-        if (routeChanged || after.screen.modals.length !== before.screen.modals.length || (changes.addedInteractive ?? 0) > 6) {
-          detail.screen = formatSnapshot(after, { maxElements: 40, maxTexts: 20 });
-        } else if ((changes.addedInteractive ?? 0) > 0) {
-          const beforeFp = new Set(before.internal.elements.map((e) => e.fingerprint));
-          detail.added = after.internal.elements
-            .filter((e) => e.visible && !beforeFp.has(e.fingerprint))
-            .slice(0, 6)
-            .map((e) => formatElement(e));
+      base.before = await this.snapshot();
+      return await this.complete(action, base, await body(base.before), signal);
+    } catch (e) {
+      return this.failure(action, base, e);
+    } finally {
+      this.d.setOverlayHidden(false);
+    }
+  }
+
+  private begin(): Baseline {
+    return { t0: clock(), startedTs: Date.now(), logId: this.d.logs.lastId, netId: this.d.network.lastId };
+  }
+
+  /** Settle after the action and report what changed. */
+  private async complete(action: string, base: Baseline, r: ActionOutcome, signal?: AbortSignal): Promise<ActionResult> {
+    const before = base.before!;
+    const result: ActionResult = {
+      ok: true,
+      action,
+      durationMs: 0,
+      ...(r.el ? { target: this.targetInfo(r.el) } : {}),
+      ...(r.mode ? { mode: r.mode } : {}),
+      ...(r.reResolved ? { reResolved: true } : {}),
+      ...(r.warnings?.length ? { warnings: r.warnings } : {}),
+    };
+    const detail: Record<string, unknown> = { ...(r.detail ?? {}) };
+    if (!r.skipSettle) {
+      const { snap: after, settled } = r.lightSettle ? await this.lightSettle(signal) : await this.settle(base.startedTs, signal);
+      const { errors, failed, ...changes } = this.changes(before, after, base.logId, base.netId);
+      // State changes on the target itself (a switch flipping) don't change the screen's structure.
+      if (r.el) {
+        const was = before.internal.elements.find((e) => e.fingerprint === r.el!.fingerprint);
+        const now = after.internal.elements.find((e) => e.fingerprint === r.el!.fingerprint);
+        if (was && now && r.el.role !== 'textbox') {
+          const fmt = (e: InternalElement) => JSON.stringify({ value: e.value, checked: e.checked, selected: e.selected, expanded: e.expanded, enabled: e.enabled });
+          if (fmt(was) !== fmt(now)) detail.targetState = `${describeState(was)} → ${describeState(now)}`;
         }
       }
-      if (Object.keys(detail).length) result.detail = detail;
-      result.durationMs = Math.round(clock() - t0);
-      this.record(action, clock() - t0);
-      return result;
+      result.settled = settled;
+      result.changes = changes;
+      if (errors.length) detail.newErrors = errors;
+      if (failed.length) detail.failedRequests = failed;
+      const routeChanged = changes.routeBefore !== changes.routeAfter;
+      if (routeChanged || after.screen.modals.length !== before.screen.modals.length || (changes.addedInteractive ?? 0) > 6) {
+        detail.screen = formatSnapshot(after, { maxElements: 40, maxTexts: 20 });
+      } else if ((changes.addedInteractive ?? 0) > 0) {
+        const beforeFp = new Set(before.internal.elements.map((e) => e.fingerprint));
+        detail.added = after.internal.elements
+          .filter((e) => e.visible && !beforeFp.has(e.fingerprint))
+          .slice(0, 6)
+          .map((e) => formatElement(e));
+      }
+    }
+    if (Object.keys(detail).length) result.detail = detail;
+    result.durationMs = Math.round(clock() - base.t0);
+    this.record(action, clock() - base.t0);
+    return result;
+  }
+
+  private failure(action: string, base: Baseline, e: unknown): ActionResult {
+    const code = errCode(e);
+    const message = e instanceof Error ? e.message : String(e);
+    if (code === 'THREW' || code === 'NATIVE_ERROR') this.d.logs.add({ level: 'error', message: `[agent ${action}] ${message}`, source: 'action' });
+    return {
+      ok: false,
+      action,
+      durationMs: Math.round(clock() - base.t0),
+      error: { code, message },
+      ...(e instanceof ToolFailure ? e.extra : {}),
+    };
+  }
+
+  /** Run an app-level action (keyboard, LogBox, alert) with the usual settle and change report. */
+  run(action: string, fn: () => Promise<{ mode: InteractionMode; detail?: Record<string, unknown>; warnings?: string[] }>, signal?: AbortSignal): Promise<ActionResult> {
+    return this.act(action, signal, async () => fn());
+  }
+
+  // ------------------------------------------------- OS-level (external) input
+
+  private external = new Map<string, { action: string; base: Baseline; el?: InternalElement; warnings: string[]; timer: ReturnType<typeof setTimeout> }>();
+  private externalSeq = 0;
+
+  /**
+   * First half of an action performed by OS automation outside the app (adb, XCUITest
+   * via Maestro): resolve and check the target exactly like an in-app tap, scroll it
+   * into view, move the devtools overlay out of the way and record a baseline. The
+   * server then injects the input at `point` and calls finishExternal.
+   */
+  async prepareExternal(action: string, target: TargetSelector | undefined, signal?: AbortSignal): Promise<{ token: string; point?: { x: number; y: number }; target?: ActionResult['target']; warnings: string[] }> {
+    const base = this.begin();
+    base.before = await this.snapshot();
+    const warnings: string[] = [];
+    let el: InternalElement | undefined;
+    let point: { x: number; y: number } | undefined;
+    this.d.setOverlayHidden(true);
+    try {
+      if (target) {
+        let snap = base.before;
+        el = this.resolve(snap, target).element;
+        if (!el.visible && el.scrollContainer) {
+          ({ snap, el } = await this.scrollIntoView(el, signal));
+          warnings.push('scrolled the element into view first');
+        }
+        ({ snap, el } = await this.ensureNotCoveredByOverlay(snap, el));
+        base.before = snap;
+        if (!el.visible || !el.bounds) throw new ToolFailure('NOT_HITTABLE', `${el.ref} ${el.role} "${el.label ?? ''}" is not visible on screen.`, { target: this.targetInfo(el) });
+        if (el.hittable === false) {
+          throw new ToolFailure('NOT_HITTABLE', `${el.ref} "${el.label ?? ''}" is covered by ${el.coveredBy}; a real touch at its center would hit that instead.`, { target: this.targetInfo(el) });
+        }
+        if (!el.enabled) warnings.push('the element is disabled; the touch is delivered but should do nothing');
+        if (action === 'tap' || action === 'longPress' || action === 'type') await this.guardSensitive(el, action === 'type' ? 'type into' : action === 'tap' ? 'tap' : 'long-press');
+        if (action === 'tap') this.guardDuplicate(el, snap);
+        const off = el.hitOffset ?? { dx: el.bounds.width / 2, dy: el.bounds.height / 2 };
+        point = { x: Math.round(el.bounds.x + off.dx), y: Math.round(el.bounds.y + off.dy) };
+      }
     } catch (e) {
-      const code = errCode(e);
-      const message = e instanceof Error ? e.message : String(e);
-      if (code === 'THREW' || code === 'NATIVE_ERROR') this.d.logs.add({ level: 'error', message: `[agent ${action}] ${message}`, source: 'action' });
-      return {
-        ok: false,
-        action,
-        durationMs: Math.round(clock() - t0),
-        error: { code, message },
-        ...(e instanceof ToolFailure ? e.extra : {}),
-      };
+      this.d.setOverlayHidden(false);
+      throw e;
+    }
+    const token = `x${++this.externalSeq}`;
+    // If the server never comes back, put the overlay back anyway.
+    const timer = setTimeout(() => {
+      this.external.delete(token);
+      this.d.setOverlayHidden(false);
+    }, 20_000);
+    this.external.set(token, { action, base, el, warnings, timer });
+    return { token, ...(point ? { point } : {}), ...(el ? { target: this.targetInfo(el) } : {}), warnings };
+  }
+
+  /** Second half: the OS-level input happened (or failed); settle and report what changed. */
+  async finishExternal(token: string, outcome: { ok: boolean; error?: string; backend: string }, signal?: AbortSignal): Promise<ActionResult> {
+    const x = this.external.get(token);
+    if (!x) throw new ToolFailure('STALE', 'Unknown or expired external action; prepare it again.');
+    this.external.delete(token);
+    clearTimeout(x.timer);
+    try {
+      if (!outcome.ok) throw new ToolFailure('NATIVE_ERROR', `OS automation (${outcome.backend}) failed: ${outcome.error ?? 'unknown error'}`, x.el ? { target: this.targetInfo(x.el) } : {});
+      if (x.action === 'tap' && x.el && x.base.before) this.lastTap = { fingerprint: x.el.fingerprint, ts: Date.now(), signature: x.base.before.screen.signature };
+      return await this.complete(x.action, x.base, { el: x.el, mode: 'os-injected', warnings: x.warnings, detail: { backend: outcome.backend }, lightSettle: x.action === 'type' }, signal);
+    } catch (e) {
+      return this.failure(x.action, x.base, e);
     } finally {
       this.d.setOverlayHidden(false);
     }

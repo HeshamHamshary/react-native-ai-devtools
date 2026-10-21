@@ -15,7 +15,7 @@ import type { TurnStats } from 'react-native-agent-devtools-protocol';
 import { redactText } from 'react-native-agent-devtools-protocol';
 import type { RepoAccess } from '../security/repoAccess.ts';
 import { toolDetail } from '../tools/format.ts';
-import { CONTROL_TOOLS, MOBILE_TOOLS } from '../tools/mobileTools.ts';
+import { CONTROL_TOOLS, MOBILE_TOOLS, type ToolContext } from '../tools/mobileTools.ts';
 import type { DeviceSession } from '../transport/devices.ts';
 import { agentEnv, agentSettings, authDecision, type AuthMode } from './credentials.ts';
 import { AsyncQueue } from './AsyncQueue.ts';
@@ -34,6 +34,8 @@ export interface AgentConfig {
   approve: (device: DeviceSession, title: string, detail: string) => Promise<boolean>;
   /** The API rejected the credentials mid-session (expired or revoked sign-in). */
   onAuthError?: (reason: string) => void;
+  /** OS-level input for the mobile tools. */
+  os?: ToolContext['os'];
 }
 
 /** Resolves to `fallback` after `ms`, without keeping the process alive once settled. */
@@ -130,6 +132,7 @@ export class AgentSession {
         tool(t.name, t.description, t.shape, async (args) => {
           const out = await t.run(args as Record<string, unknown>, {
             device: this.device,
+            ...(this.cfg.os ? { os: this.cfg.os } : {}),
             onRpc: (_m, r) => {
               if (this.turn) this.turn.deviceMs += r.deviceMs;
             },

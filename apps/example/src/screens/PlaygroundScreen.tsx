@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { FlatList, Pressable, StyleSheet, Text, View } from 'react-native';
+import { Alert, FlatList, Pressable, StyleSheet, Text, View } from 'react-native';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import { api } from '../api';
 import type { RootStack } from '../navigation';
@@ -47,6 +47,21 @@ export function PlaygroundScreen({ navigation }: NativeStackScreenProps<RootStac
               },
             );
           }}
+        />
+      </Card>
+
+      <Card>
+        <Text style={[styles.title, { color: c.text }]}>2b · Native alert</Text>
+        <PrimaryButton
+          testID="clear-cache"
+          title="Clear cache"
+          variant="secondary"
+          onPress={() =>
+            Alert.alert('Clear cache?', 'Cached fares will be downloaded again.', [
+              { text: 'Not now', style: 'cancel', onPress: () => setStatus('Cache kept') },
+              { text: 'Clear', onPress: () => setStatus('Cache cleared') },
+            ])
+          }
         />
       </Card>
 
