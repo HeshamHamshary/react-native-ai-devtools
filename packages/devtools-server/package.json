@@ -1,0 +1,45 @@
+{
+  "name": "react-native-agent-devtools-server",
+  "version": "0.1.0",
+  "description": "Local bridge between a React Native app running react-native-agent-devtools and a Claude agent (Claude Agent SDK / Claude Code MCP).",
+  "license": "MIT",
+  "type": "module",
+  "bin": "./bin/rnad-server.js",
+  "main": "./lib/index.js",
+  "types": "./lib/index.d.ts",
+  "exports": {
+    ".": {
+      "react-native-agent-devtools-source": "./src/index.ts",
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "bin",
+    "lib",
+    "src",
+    "!**/*.test.ts"
+  ],
+  "scripts": {
+    "start": "node --conditions=react-native-agent-devtools-source src/cli.ts",
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --test --conditions=react-native-agent-devtools-source 'src/**/*.test.ts'"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "0.3.306",
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "react-native-agent-devtools-protocol": "workspace:^",
+    "ws": "^8.18.3",
+    "zod": "^4.1.12"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/ws": "^8.18.1",
+    "typescript": "^6.0.3"
+  },
+  "engines": {
+    "node": ">= 22.18.0"
+  }
+}

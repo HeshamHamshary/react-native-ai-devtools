@@ -1,0 +1,143 @@
+import { randomUUID } from 'node:crypto';
+import { EventEmitter } from 'node:events';
+import type WebSocket from 'ws';
+import type { CapabilityMap, DeviceInfo, RpcMethod, ServerMessage, ToolError } from 'react-native-agent-devtools-protocol';
+import { encode } from 'react-native-agent-devtools-protocol';
+
+export class RpcError extends Error {
+  readonly code: ToolError['code'];
+
+  constructor(code: ToolError['code'], message: string) {
+    super(message);
+    this.code = code;
+  }
+}
+
+interface Pending {
+  resolve: (v: RpcResult) => void;
+  reject: (e: Error) => void;
+  timer: NodeJS.Timeout;
+  t0: number;
+  method: RpcMethod;
+}
+
+export interface RpcResult<T = unknown> {
+  result: T;
+  /** Device-side execution time. */
+  deviceMs: number;
+  /** Server-observed round trip (includes transport + device). */
+  rttMs: number;
+}
+
+/** One connected app instance. */
+export class DeviceSession extends EventEmitter {
+  readonly id = randomUUID();
+  readonly connectedAt = Date.now();
+  private pending = new Map<string, Pending>();
+  private seq = 0;
+  stats = { calls: 0, rttMs: 0, deviceMs: 0 };
+
+  private readonly ws: WebSocket;
+  readonly info: DeviceInfo;
+  readonly capabilities: CapabilityMap;
+  readonly remote: boolean;
+
+  constructor(ws: WebSocket, info: DeviceInfo, capabilities: CapabilityMap, remote: boolean) {
+    super();
+    this.ws = ws;
+    this.info = info;
+    this.capabilities = capabilities;
+    this.remote = remote;
+  }
+
+  get label(): string {
+    const i = this.info;
+    return `${i.appName || 'app'} on ${i.platform} ${i.osVersion}${i.model ? ` (${i.model}${i.isEmulator ? ', emulator' : ''})` : ''}`;
+  }
+
+  get open(): boolean {
+    return this.ws.readyState === this.ws.OPEN;
+  }
+
+  send(msg: ServerMessage): void {
+    if (this.open) this.ws.send(encode(msg));
+  }
+
+  rpc<T = unknown>(method: RpcMethod, params: Record<string, unknown> = {}, timeoutMs = 30_000, signal?: AbortSignal): Promise<RpcResult<T>> {
+    if (!this.open) return Promise.reject(new RpcError('NO_DEVICE', 'Device disconnected'));
+    const id = `r${++this.seq}`;
+    return new Promise<RpcResult<T>>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pending.delete(id);
+        this.send({ type: 'rpc.cancel', id });
+        reject(new RpcError('TIMEOUT', `Device did not answer ${method} within ${timeoutMs}ms`));
+      }, timeoutMs);
+      this.pending.set(id, { resolve: resolve as (v: RpcResult) => void, reject, timer, t0: performance.now(), method });
+      signal?.addEventListener('abort', () => {
+        if (!this.pending.has(id)) return;
+        clearTimeout(timer);
+        this.pending.delete(id);
+        this.send({ type: 'rpc.cancel', id });
+        reject(new RpcError('CANCELLED', `${method} cancelled`));
+      });
+      this.send({ type: 'rpc.call', id, method, params, timeoutMs });
+    });
+  }
+
+  handleResult(id: string, ok: boolean, payload: unknown, deviceMs = 0): void {
+    const p = this.pending.get(id);
+    if (!p) return;
+    clearTimeout(p.timer);
+    this.pending.delete(id);
+    const rttMs = Math.round(performance.now() - p.t0);
+    this.stats.calls++;
+    this.stats.rttMs += rttMs;
+    this.stats.deviceMs += deviceMs;
+    if (ok) p.resolve({ result: payload, deviceMs, rttMs });
+    else {
+      const err = payload as ToolError;
+      p.reject(new RpcError(err.code, err.message));
+    }
+  }
+
+  cancelAll(): void {
+    for (const [id, p] of this.pending) {
+      clearTimeout(p.timer);
+      this.send({ type: 'rpc.cancel', id });
+      p.reject(new RpcError('CANCELLED', `${p.method} cancelled`));
+    }
+    this.pending.clear();
+  }
+
+  close(): void {
+    this.cancelAll();
+    this.emit('close');
+  }
+}
+
+export class DeviceRegistry extends EventEmitter {
+  private devices = new Map<string, DeviceSession>();
+
+  add(d: DeviceSession): void {
+    this.devices.set(d.id, d);
+    d.once('close', () => {
+      this.devices.delete(d.id);
+      this.emit('change');
+    });
+    this.emit('change');
+  }
+
+  list(): DeviceSession[] {
+    return [...this.devices.values()];
+  }
+
+  /** Most recently connected device (what MCP tools act on by default). */
+  active(): DeviceSession | undefined {
+    const all = this.list();
+    return all[all.length - 1];
+  }
+
+  get(id: string): DeviceSession | undefined {
+    return this.devices.get(id);
+  }
+}
