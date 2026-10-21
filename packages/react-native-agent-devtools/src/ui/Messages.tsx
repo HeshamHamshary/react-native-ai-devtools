@@ -37,7 +37,7 @@ function ToolRow({ m, p }: { m: ChatMessage; p: Palette }) {
           accessibilityLabel="Screenshot taken by the agent"
           source={{ uri: m.image.uri }}
           resizeMode="contain"
-          style={[styles.shot, { aspectRatio: m.image.width / Math.max(1, m.image.height), borderColor: p.border }]}
+          style={[styles.shot, open ? styles.shotOpen : styles.shotThumb, { aspectRatio: m.image.width / Math.max(1, m.image.height), borderColor: p.border }]}
         />
       ) : null}
       {open ? (
@@ -118,7 +118,9 @@ const styles = StyleSheet.create({
   toolText: { flex: 1, fontSize: 13 },
   toolMs: { fontSize: 11.5, fontVariant: ['tabular-nums'] },
   chevron: { fontSize: 11, width: 10, textAlign: 'center' },
-  shot: { width: '100%', maxHeight: 360, borderTopWidth: StyleSheet.hairlineWidth },
+  shot: { borderWidth: StyleSheet.hairlineWidth, borderRadius: 6, marginHorizontal: 10, marginBottom: 10 },
+  shotThumb: { width: '38%' },
+  shotOpen: { width: undefined, alignSelf: 'stretch' },
   toolDetail: { borderTopWidth: StyleSheet.hairlineWidth, padding: 10, gap: 6 },
   detailMeta: { fontSize: 11.5 },
   detailText: { fontFamily: mono, fontSize: 11, lineHeight: 15, padding: 8, borderRadius: 6 },

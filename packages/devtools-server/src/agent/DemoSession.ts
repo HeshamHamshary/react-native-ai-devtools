@@ -73,6 +73,13 @@ export class DemoSession {
           return r.result.text;
         })
       : undefined;
+    const shot = /screenshot/i.test(text)
+      ? await run(`${turnId}-5`, 'mobile_screenshot', 'Screenshot', async () => {
+          const r = await d.rpc<{ width: number; height: number; captureMs: number }>('screenshot', { maxWidth: 720 }, 15_000);
+          deviceMs += r.deviceMs;
+          return `Screenshot ${r.result.width}x${r.result.height}px captured in ${Math.round(r.result.captureMs)}ms.`;
+        })
+      : undefined;
     const reply = [
       `**Demo agent (no model).** You asked: “${text.slice(0, 80)}”.`,
       '',
@@ -81,6 +88,7 @@ export class DemoSession {
       (inspected ?? screen).split('\n').slice(0, inspected ? 14 : 8).join('\n'),
       '```',
       ...(audit ? ['Screen audit:', '```', audit.split('\n').slice(0, 8).join('\n'), '```'] : []),
+      ...(shot ? [`${shot} (A model would describe it; the demo agent can't.)`] : []),
       ...(errors ? ['Recent JS errors:', errors] : []),
       '',
       'Tap "Set up Claude", or run `react-native-agent-devtools-server claude`, for real answers.',
@@ -91,7 +99,7 @@ export class DemoSession {
       await new Promise((r) => setTimeout(r, 18));
     }
     const totalMs = Math.round(performance.now() - t0);
-    d.send({ type: 'chat.done', turnId, ok: true, stats: { totalMs, toolMs, deviceMs, modelMs: totalMs - toolMs, toolCalls: 1 + [errors, inspected, audit].filter(Boolean).length, model: this.modelName } });
+    d.send({ type: 'chat.done', turnId, ok: true, stats: { totalMs, toolMs, deviceMs, modelMs: totalMs - toolMs, toolCalls: 1 + [errors, inspected, audit, shot].filter(Boolean).length, model: this.modelName } });
     d.send({ type: 'chat.status', state: 'idle' });
     this.turn = undefined;
   }
