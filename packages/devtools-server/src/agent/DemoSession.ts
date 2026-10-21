@@ -21,7 +21,7 @@ export class DemoSession {
     return 'demo (scripted, no model)';
   }
 
-  async send(text: string, turnId: string): Promise<void> {
+  async send(text: string, turnId: string, context?: { selection?: string }): Promise<void> {
     this.turn = turnId;
     const t0 = performance.now();
     const d = this.device;
@@ -35,7 +35,7 @@ export class DemoSession {
         const out = await fn();
         const ms = Math.round(performance.now() - s);
         toolMs += ms;
-        d.send({ type: 'chat.tool', turnId, toolId, name, phase: 'end', ok: true, durationMs: ms });
+        d.send({ type: 'chat.tool', turnId, toolId, name, phase: 'end', ok: true, durationMs: ms, detail: out.slice(0, 1_200) });
         return out;
       } catch (e) {
         d.send({ type: 'chat.tool', turnId, toolId, name, phase: 'end', ok: false, durationMs: Math.round(performance.now() - s) });
@@ -54,16 +54,31 @@ export class DemoSession {
           return r.result.entries.map((e) => `- ${e.message.split('\n')[0]}`).join('\n') || '- none captured';
         })
       : undefined;
+    const inspected = context?.selection
+      ? await run(`${turnId}-3`, 'mobile_inspect', 'Inspect selected element', async () => {
+          const r = await d.rpc<{ text: string }>('inspect', {}, 15_000);
+          deviceMs += r.deviceMs;
+          return r.result.text;
+        })
+      : undefined;
+    const audit = /check|bug|audit|wrong/i.test(text)
+      ? await run(`${turnId}-4`, 'mobile_audit_screen', 'Audit screen', async () => {
+          const r = await d.rpc<{ text: string }>('audit', {}, 15_000);
+          deviceMs += r.deviceMs;
+          return r.result.text;
+        })
+      : undefined;
     const reply = [
       `**Demo agent (no model).** You asked: “${text.slice(0, 80)}”.`,
       '',
       `Here is what the device reported:`,
       '```',
-      screen.split('\n').slice(0, 8).join('\n'),
+      (inspected ?? screen).split('\n').slice(0, inspected ? 14 : 8).join('\n'),
       '```',
+      ...(audit ? ['Screen audit:', '```', audit.split('\n').slice(0, 8).join('\n'), '```'] : []),
       ...(errors ? ['Recent JS errors:', errors] : []),
       '',
-      'Start the server with `ANTHROPIC_API_KEY` for real answers.',
+      'Tap "Set up Claude", or run `react-native-agent-devtools-server claude`, for real answers.',
     ].join('\n');
     for (const chunk of reply.match(/[\s\S]{1,24}/g) ?? []) {
       if (this.turn !== turnId) return;
@@ -71,7 +86,7 @@ export class DemoSession {
       await new Promise((r) => setTimeout(r, 18));
     }
     const totalMs = Math.round(performance.now() - t0);
-    d.send({ type: 'chat.done', turnId, ok: true, stats: { totalMs, toolMs, deviceMs, modelMs: totalMs - toolMs, toolCalls: errors ? 2 : 1, model: this.modelName } });
+    d.send({ type: 'chat.done', turnId, ok: true, stats: { totalMs, toolMs, deviceMs, modelMs: totalMs - toolMs, toolCalls: 1 + [errors, inspected, audit].filter(Boolean).length, model: this.modelName } });
     d.send({ type: 'chat.status', state: 'idle' });
     this.turn = undefined;
   }

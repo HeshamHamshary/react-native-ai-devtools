@@ -10,17 +10,22 @@ export interface ConnectionHandlers {
   hello: () => ClientMessage;
 }
 
+/** The URL the JS bundle was loaded from (the Metro dev server in development). */
+export function bundleURL(): string | undefined {
+  try {
+    const sourceCode = TurboModuleRegistry.get<{ getConstants(): { scriptURL?: string } } & import('react-native').TurboModule>('SourceCode');
+    return sourceCode?.getConstants().scriptURL ?? undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /** Derive the dev machine host from the Metro bundle URL the app was loaded from. */
 export function defaultServerUrl(port = 8765): string {
   let host: string | undefined;
-  try {
-    const sourceCode = TurboModuleRegistry.get<{ getConstants(): { scriptURL?: string } } & import('react-native').TurboModule>('SourceCode');
-    const url = sourceCode?.getConstants().scriptURL;
-    const m = url ? /^https?:\/\/([^/:]+)/.exec(url) : null;
-    if (m?.[1]) host = m[1];
-  } catch {
-    // fall through to platform defaults
-  }
+  const url = bundleURL();
+  const m = url ? /^https?:\/\/([^/:]+)/.exec(url) : null;
+  if (m?.[1]) host = m[1];
   host ??= Platform.OS === 'android' ? '10.0.2.2' : 'localhost';
   return `ws://${host}:${port}`;
 }

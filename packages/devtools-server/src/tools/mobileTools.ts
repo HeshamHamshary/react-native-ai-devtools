@@ -91,6 +91,38 @@ export const MOBILE_TOOLS: MobileTool[] = [
       }),
   },
   {
+    name: 'mobile_inspect',
+    kind: 'read',
+    description: [
+      'Everything known about one element, React-aware: the file:line where its JSX is written (mapped through Metro), the components that rendered it',
+      'and where, props, event handlers present, layout style, accessibility, pointerEvents on it and its ancestors, whether a real touch reaches it',
+      '(and where the covering view is written), plus static findings (disabled, covered, no handler, outside its container, misaligned, small target).',
+      'Works on any view, not only interactive ones (element refs, text refs like t12, #testID or visible text).',
+      'Omit target to inspect the element the developer picked in the app with inspect mode. Static: nothing is tapped.',
+      'Use it first for "why doesn\'t this work", "why is this misaligned" and "which component/file is this".',
+    ].join(' '),
+    shape: {
+      target: target.optional().describe('Element to inspect; omit for the developer\'s selection'),
+      x: z.number().optional().describe('Or inspect what a real touch at this window point (points) would hit'),
+      y: z.number().optional(),
+    },
+    summary: (a) => (a.target ? `Inspect ${quote(a.target)}` : typeof a.x === 'number' ? `Inspect point ${String(a.x)},${String(a.y)}` : 'Inspect selected element'),
+    run: (a, ctx) =>
+      guarded(async () => {
+        const params = typeof a.x === 'number' && typeof a.y === 'number' ? { point: { x: a.x, y: a.y } } : a.target ? { target: a.target } : {};
+        return text((await call<{ text: string }>(ctx, 'inspect', params, 15_000)).text);
+      }),
+  },
+  {
+    name: 'mobile_audit_screen',
+    kind: 'read',
+    description:
+      'Static review of the current screen in milliseconds: elements a real touch cannot reach (and what covers them), disabled or handler-less buttons, overlapping touch targets, small targets, missing accessibility labels, text outside its container or misaligned in rows, and errors / failed requests recorded on this screen. Nothing is tapped. Use for "check this screen for bugs".',
+    shape: {},
+    summary: () => 'Audit screen',
+    run: (_a, ctx) => guarded(async () => text((await call<{ text: string }>(ctx, 'audit', {}, 15_000)).text)),
+  },
+  {
     name: 'mobile_tap',
     kind: 'control',
     description:
@@ -276,7 +308,8 @@ export const MOBILE_TOOLS: MobileTool[] = [
   {
     name: 'mobile_get_logs',
     kind: 'read',
-    description: 'Recent console output and uncaught JS errors captured in the app (redacted). Use errors_only for a quick error check.',
+    description:
+      'Recent console output and uncaught JS errors captured in the app since the devtools started (redacted). Error stacks are mapped to app source lines ("at fn (file:line)"). Use errors_only for a quick error check.',
     shape: {
       errors_only: z.boolean().optional(),
       levels: z.array(z.enum(['debug', 'log', 'info', 'warn', 'error'])).optional(),
@@ -285,18 +318,19 @@ export const MOBILE_TOOLS: MobileTool[] = [
     summary: (a) => (a.errors_only ? 'Read JS errors' : 'Read logs'),
     run: (a, ctx) =>
       guarded(async () => {
-        const r = await call<{ entries: LogEntry[]; total: number; dropped: number }>(ctx, 'getLogs', {
+        const r = await call<{ entries: LogEntry[]; total: number; dropped: number; capturedSince?: number }>(ctx, 'getLogs', {
           errorsOnly: a.errors_only === true,
           ...(a.levels ? { levels: a.levels } : {}),
           limit: a.limit ?? 40,
         });
-        return text(formatLogs(r.entries, r.total, r.dropped));
+        return text(formatLogs(r.entries, r.total, r.dropped, r.capturedSince));
       }),
   },
   {
     name: 'mobile_get_network',
     kind: 'read',
-    description: 'Recent fetch/XMLHttpRequest activity from the app JS (sanitized URLs, status, duration, failure reason, screen). Native-originated requests are not captured.',
+    description:
+      'Recent fetch/XMLHttpRequest activity from the app JS (sanitized URLs, status, duration, failure reason, the screen it ran on, and the app code that started it as file:line). Native-originated requests are not captured.',
     shape: {
       failures_only: z.boolean().optional(),
       url_contains: z.string().optional(),

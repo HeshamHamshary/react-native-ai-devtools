@@ -1,6 +1,7 @@
 import type { WebSocket } from 'ws';
 import type { TurnStats } from 'react-native-agent-devtools-protocol';
-import { appStateBlock } from '../agent/prompt.ts';
+import { appStateBlock, selectionBlock } from '../agent/prompt.ts';
+import { toolDetail } from '../tools/format.ts';
 import { MOBILE_TOOLS, type ToolOutput } from '../tools/mobileTools.ts';
 import type { DeviceRegistry, DeviceSession } from '../transport/devices.ts';
 import { parseBridgeMessage, type BridgeMessage, type HubMessage } from './messages.ts';
@@ -107,7 +108,7 @@ export class ChannelHub {
     });
   }
 
-  async send(device: DeviceSession, text: string, chatId: string): Promise<void> {
+  async send(device: DeviceSession, text: string, chatId: string, context?: { selection?: string }): Promise<void> {
     if (!this.chatAvailable) {
       device.send({ type: 'chat.error', message: 'Claude Code is not connected.', code: 'AGENT_UNAVAILABLE' });
       return;
@@ -132,7 +133,7 @@ export class ChannelHub {
     } catch (e) {
       note = e instanceof Error ? e.message : 'unavailable';
     }
-    this.post({ type: 'message', chatId, device: device.label, platform: device.info.platform, content: `${appStateBlock(summary, note)}\n\n${text}` });
+    this.post({ type: 'message', chatId, device: device.label, platform: device.info.platform, content: `${appStateBlock(summary, note)}\n\n${selectionBlock(context?.selection)}${text}` });
     turn.slowTimer = setTimeout(() => {
       if (this.turn !== turn || turn.toolCalls > 0) return;
       device.send({
@@ -187,7 +188,8 @@ export class ChannelHub {
     if (turn && this.turn === turn) {
       const durationMs = Math.round(performance.now() - t0);
       turn.toolMs += durationMs;
-      device?.send({ type: 'chat.tool', turnId: turn.chatId, toolId: msg.id, name: tool.name, phase: 'end', ok: !out.isError, durationMs });
+      const detail = toolDetail(out.content);
+      device?.send({ type: 'chat.tool', turnId: turn.chatId, toolId: msg.id, name: tool.name, phase: 'end', ok: !out.isError, durationMs, ...(detail ? { detail } : {}) });
       if (tool.kind === 'control') device?.send({ type: 'chat.status', state: 'thinking', turnId: turn.chatId });
     }
     return out;
@@ -261,8 +263,8 @@ export class ChannelChat {
     return this.hub.busy;
   }
 
-  send(text: string, turnId: string): Promise<void> {
-    return this.hub.send(this.device, text, turnId);
+  send(text: string, turnId: string, context?: { selection?: string }): Promise<void> {
+    return this.hub.send(this.device, text, turnId, context);
   }
 
   async interrupt(): Promise<void> {

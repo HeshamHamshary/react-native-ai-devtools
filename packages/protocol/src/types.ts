@@ -140,6 +140,8 @@ export interface LogEntry {
   fatal?: boolean;
   route?: string;
   repeat?: number;
+  /** Top frames of `stack` in the app's own code, mapped by Metro ("fn (file:line)"). */
+  appFrames?: string[];
 }
 
 export interface NetworkEntry {
@@ -158,6 +160,8 @@ export interface NetworkEntry {
   pending?: boolean;
   requestBody?: string;
   responseBody?: string;
+  /** App code that started the request, mapped by Metro ("fn (file:line)"), innermost first. */
+  initiator?: string[];
 }
 
 export interface NavigationEvent {
@@ -237,3 +241,69 @@ export interface CapabilityInfo {
 }
 
 export type CapabilityMap = Record<string, CapabilityInfo>;
+
+/** A position in the app's source code, as mapped by the Metro dev server. */
+export interface SourceRef {
+  file: string;
+  line: number;
+  column?: number;
+}
+
+export interface Finding {
+  severity: 'error' | 'warning' | 'info';
+  /** Stable machine-readable code, e.g. `COVERED`, `DISABLED`, `NO_HANDLER`. */
+  code: string;
+  message: string;
+  /** Element ref the finding is about, when it concerns one element. */
+  ref?: string;
+}
+
+/**
+ * Everything the runtime can reliably say about one element. Fields are omitted
+ * rather than guessed: no `source` means it could not be mapped (see `sourceNote`).
+ */
+export interface ElementDetails {
+  ref?: string;
+  role?: Role;
+  label?: string;
+  text?: string;
+  /** The native view: Fabric component name and React host tag. */
+  host: { type: string; tag?: number; testID?: string; nativeID?: string };
+  /** Nearest app component around the element. */
+  component?: string;
+  /**
+   * Components that rendered this element (React owners), innermost first. `source`
+   * is where that component's element was written in JSX.
+   */
+  owners: { name: string; source?: SourceRef }[];
+  /** Component nesting (names), outermost first, trimmed to the last levels. */
+  path: string[];
+  route?: string;
+  bounds?: Rect;
+  visible?: boolean;
+  hittable?: boolean;
+  coveredBy?: string;
+  /** Where the covering view's JSX is written, when it is app code. */
+  coveredBySource?: SourceRef;
+  /** Where this element's JSX is written in the app's own code. */
+  source?: SourceRef & { element: string; inComponent?: string };
+  /** Why `source` is missing (dev server unreachable, React stack budget exceeded, …). */
+  sourceNote?: string;
+  accessibility: { label?: string; role?: string; hint?: string; accessible?: boolean; state?: Record<string, unknown> };
+  /** Layout-relevant flattened style of the native view. */
+  style?: Record<string, string | number | boolean>;
+  /** Primitive props of the component the app wrote (redacted, truncated). */
+  props: Record<string, string | number | boolean>;
+  /** Event handler props present. Their source location is not available on Hermes. */
+  handlers: { prop: string; on: string; name?: string }[];
+  state: {
+    enabled: boolean;
+    disabledBy?: string;
+    focused?: boolean;
+    value?: string | number | boolean;
+    /** pointerEvents settings on the view or its ancestors that affect touches. */
+    pointerEvents?: { value: string; on: string }[];
+  };
+  /** Problems found by static checks (no interaction was performed). */
+  findings: Finding[];
+}

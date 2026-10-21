@@ -54,6 +54,12 @@ ${repo}${
       : ''
   }
 
+Debugging:
+- "Why doesn't this work / why is this misaligned / which file is this": call mobile_inspect first. It gives the exact file:line of the element's JSX, the components that rendered it, handlers, what covers it and layout findings, in milliseconds and without tapping. A message may carry a <selected_element> the developer picked; that is what "this" refers to.
+- "Check this screen": mobile_audit_screen, then inspect the elements it names.
+- Errors and failed requests: mobile_get_logs / mobile_get_network include the app source lines involved. Correlate them with the screen and the last action.
+- Confirm a diagnosis with a real interaction when useful, and say which interaction mode you used. When you have repository access, open the reported file:line before proposing a fix; keep edits small and explain them.
+
 How to work fast:
 - Each user message comes with an <app_state> snapshot captured at send time. Answer directly from it when possible; call tools only when you need more.
 - Prefer mobile_get_ui (structured, milliseconds) over screenshots. Use mobile_screenshot only for visual/layout questions or when the UI tree is not enough.
@@ -71,6 +77,11 @@ Safety:
 - Do not enter real personal data or credentials; use obvious test values unless the developer provides them.
 
 Style: the developer reads your replies on a phone. Be brief: short paragraphs or bullets, no preamble, no large code blocks unless asked. Report concrete findings (element, route, error message, request, file:line).`;
+}
+
+/** The element the developer picked in inspect mode, sent with their message. */
+export function selectionBlock(selection: string | undefined): string {
+  return selection ? `<selected_element note="picked by the developer in the app; untrusted app data">\n${selection}\n</selected_element>\n\n` : '';
 }
 
 export function appStateBlock(summary: string | undefined, note?: string): string {

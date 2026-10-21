@@ -135,11 +135,13 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
 
   let availability = await computeAvailability();
   const sessions = new Map<string, ChatSession>();
+  /** Model chosen in the app, per device (built-in agent only). */
+  const modelFor = new Map<string, string>();
   const mcp = opts.mcp ? createMcpHandler(devices, SERVER_VERSION) : undefined;
   let port = opts.port;
 
-  const serverInfo = (session?: ChatSession): ServerInfo => {
-    const model = availability.via ? undefined : (session?.modelName ?? opts.model);
+  const serverInfo = (session?: ChatSession, device?: DeviceSession): ServerInfo => {
+    const model = availability.via ? undefined : (session?.modelName ?? (device ? modelFor.get(device.id) : undefined) ?? opts.model);
     const consoleSetup = availability.mode === undefined || availability.mode === 'console';
     return {
       version: SERVER_VERSION,
@@ -164,7 +166,7 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
     if (!availability.mode) return undefined;
     const s = new AgentSession(device, {
       auth: availability.mode,
-      model: opts.model,
+      model: modelFor.get(device.id) ?? opts.model,
       repo,
       allowEdits: opts.allowEdits,
       instructions,
@@ -189,7 +191,7 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
       sessions.delete(d.id);
       const s = newSession(d);
       if (s) sessions.set(d.id, s);
-      d.send({ type: 'welcome', sessionId: d.id, trusted: d.trusted, server: serverInfo(s) });
+      d.send({ type: 'welcome', sessionId: d.id, trusted: d.trusted, server: serverInfo(s, d) });
     }
     log(`agent ${availability.available ? `ready (credentials: ${availability.source})` : `unavailable: ${availability.reason}`}`);
   };
@@ -341,7 +343,7 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
         const session = newSession(device);
         if (session) sessions.set(device.id, session);
         log(`device connected: ${device.label}${remote ? ` from ${addr}` : ''}${trusted ? ' (paired)' : ''}`);
-        device.send({ type: 'welcome', sessionId: device.id, trusted, ...(issued ? { deviceToken: issued } : {}), server: serverInfo(session) });
+        device.send({ type: 'welcome', sessionId: device.id, trusted, ...(issued ? { deviceToken: issued } : {}), server: serverInfo(session, device) });
         return;
       }
 
@@ -361,7 +363,7 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
           }
           devices.focus(device.id);
           log(`chat ← ${device.label}: ${redactText(msg.text).slice(0, 120)}`);
-          await session.send(msg.text, msg.id);
+          await session.send(msg.text, msg.id, msg.context);
           return;
         }
         case 'chat.cancel':
@@ -373,6 +375,17 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
           sessions.delete(device.id);
           const s = newSession(device);
           if (s) sessions.set(device.id, s);
+          return;
+        }
+        case 'chat.config': {
+          if (msg.model) modelFor.set(device.id, msg.model);
+          else modelFor.delete(device.id);
+          sessions.get(device.id)?.close();
+          sessions.delete(device.id);
+          const s = newSession(device);
+          if (s) sessions.set(device.id, s);
+          log(`model for ${device.label}: ${msg.model ?? 'default'}`);
+          device.send({ type: 'welcome', sessionId: device.id, trusted: device.trusted, server: serverInfo(s, device) });
           return;
         }
         case 'setup.open':
@@ -394,6 +407,7 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
       clearTimeout(helloTimer);
       if (!device) return;
       log(`device disconnected: ${device.label}`);
+      modelFor.delete(device.id);
       sessions.get(device.id)?.close();
       sessions.delete(device.id);
       device.close();

@@ -3,7 +3,10 @@ import type {
   ChatState,
   ClientMessage,
   DeviceInfo,
+  ElementDetails,
+  LogEntry,
   LogLevel,
+  NetworkEntry,
   RpcMethod,
   ScreenshotResult,
   ServerInfo,
@@ -17,16 +20,27 @@ import { NavigationTracker, type NavigationRefLike } from '../collectors/Navigat
 import { NetworkCollector, type NetworkOptions } from '../collectors/NetworkCollector';
 import { CommitTracker } from '../executor/CommitTracker';
 import { Executor, ToolFailure } from '../executor/Executor';
+import { auditScreen, formatAudit, layoutFindings } from '../inspector/audit';
+import { attachSources, describeElement, elementForHost, formatDetails, type DetailsDeps } from '../inspector/details';
 import { boundingRect, currentFiberForInstance, FiberTag, nativeTagOf, type Fiber } from '../inspector/fiber';
 import { formatElement, formatSnapshot } from '../inspector/format';
-import { Inspector } from '../inspector/Inspector';
+import { Inspector, type InternalElement, type Snapshot } from '../inspector/Inspector';
 import { matchTarget } from '../inspector/match';
+import { devServerOrigin, formatLocation, parseStack, Symbolicator } from '../inspector/source';
 import { capabilities, native, nativeAvailable, nativeConstants } from '../native';
-import { Connection, defaultServerUrl, type ConnectionState } from '../transport/Connection';
+import { bundleURL, Connection, defaultServerUrl, type ConnectionState } from '../transport/Connection';
 import { CancelledError, clock, nextId } from '../utils/misc';
 import { Store } from '../utils/Store';
 
 export const LIBRARY_VERSION = '0.1.0';
+
+/** Short title for a picked element, e.g. `Pressable "Log in" · LoginScreen.tsx:88`. */
+export function selectionTitle(d: ElementDetails): string {
+  const name = d.source?.element ?? d.component ?? d.host.type;
+  const label = d.label ?? d.host.testID;
+  const where = d.source ? ` · ${d.source.file.split('/').pop()}:${d.source.line}` : '';
+  return `${name}${label ? ` "${label}"` : ''}${where}`;
+}
 
 export interface ChatMessage {
   id: string;
@@ -36,7 +50,11 @@ export interface ChatMessage {
   text: string;
   ts: number;
   turnId?: string;
-  tool?: { name: string; phase: 'start' | 'end'; ok?: boolean; durationMs?: number; summary?: string };
+  tool?: { name: string; phase: 'start' | 'end'; ok?: boolean; durationMs?: number; summary?: string; detail?: string };
+  /** A picked element sent along with a user message (its title). */
+  attachment?: string;
+  /** Screenshot taken by this tool call (data URI), for a preview in the chat. */
+  image?: { uri: string; width: number; height: number };
 }
 
 export interface PendingConfirm {
@@ -63,6 +81,17 @@ export interface UIState {
   lastStats?: TurnStats;
   /** Anthropic sign-in started from "Set up Claude" (cleared once the agent is available). */
   setup?: { state: SetupState; message?: string };
+  /** Inspect mode: the next tap on the app picks an element instead of operating it. */
+  inspecting: boolean;
+  /** The element the developer picked, with everything known about it. */
+  selection?: Selection;
+}
+
+export interface Selection {
+  details: ElementDetails;
+  text: string;
+  /** Source positions are still being resolved through Metro. */
+  resolving: boolean;
 }
 
 export interface RuntimeOptions {
@@ -84,7 +113,7 @@ function strip<T extends object>(o: T, keys: string[]): Partial<T> {
   return out as Partial<T>;
 }
 
-const INTERNAL_KEYS = ['fiber', 'owners', 'fingerprint', 'hostType', 'pressHandler', 'longPressHandler', 'pressability', 'screenTag', 'modalTag', 'hitOffset', 'textParts', 'route'];
+const INTERNAL_KEYS = ['fiber', 'coveredByFiber', 'owners', 'fingerprint', 'hostType', 'pressHandler', 'longPressHandler', 'pressability', 'screenTag', 'modalTag', 'hitOffset', 'textParts', 'route'];
 
 /**
  * Orchestrates collectors, inspector, executor and the server connection for one
@@ -109,6 +138,10 @@ export class Runtime {
   private deltaTimer?: ReturnType<typeof setTimeout>;
   private currentAssistantId?: string;
   private rpcStats = { calls: 0, deviceMs: 0 };
+  readonly symbolicator = new Symbolicator(() => devServerOrigin(bundleURL()));
+  private readonly detailsDeps: DetailsDeps;
+  private selectionHost?: Fiber;
+  private lastScreenshot?: { uri: string; width: number; height: number; ts: number };
 
   constructor(private readonly opts: RuntimeOptions) {
     const routeOf = () => this.nav.current;
@@ -121,7 +154,13 @@ export class Runtime {
       chat: 'idle',
       messages: [],
       overlayHidden: false,
+      inspecting: false,
     });
+    this.detailsDeps = {
+      flattenStyle: (st) => StyleSheet.flatten(st as never) as Record<string, unknown> | undefined,
+      measure: (f) => boundingRect(f),
+      platform: Platform.OS === 'android' ? 'android' : 'ios',
+    };
     this.inspector = new Inspector(() => this.appRoot(), {
       measure: (f) => boundingRect(f),
       flattenStyle: (s) => StyleSheet.flatten(s as never) as Record<string, unknown> | undefined,
@@ -325,22 +364,168 @@ export class Runtime {
 
   // ---------------------------------------------------------------- chat
 
-  sendChat(text: string): void {
+  /** Send a chat message; `withSelection` attaches the element picked in inspect mode. */
+  sendChat(text: string, withSelection = false): void {
     const t = text.trim();
     if (!t) return;
     const id = nextId('m');
-    this.addMessage({ id, role: 'user', text: t, ts: Date.now() });
+    const selection = withSelection ? this.store.get().selection : undefined;
+    this.addMessage({ id, role: 'user', text: t, ts: Date.now(), ...(selection ? { attachment: selectionTitle(selection.details) } : {}) });
     if (!this.conn?.isOpen || this.store.get().connection !== 'connected') {
       this.addMessage({ id: nextId('e'), role: 'error', text: 'Not connected to the devtools server.', ts: Date.now() });
       return;
     }
-    this.send({ type: 'chat.send', id, text: t });
+    this.send({ type: 'chat.send', id, text: t, ...(selection ? { context: { selection: selection.text } } : {}) });
     this.store.set({ chat: 'thinking' });
+  }
+
+  // ------------------------------------------------------------- inspection
+
+  startInspect(): void {
+    this.store.set({ inspecting: true });
+  }
+
+  stopInspect(): void {
+    this.store.set({ inspecting: false });
+  }
+
+  clearSelection(): void {
+    this.selectionHost = undefined;
+    this.store.set({ selection: undefined });
+  }
+
+  /** Inspect what a real touch at window point (x, y) would land on. */
+  async pickAt(x: number, y: number): Promise<void> {
+    const snap = await this.executor.snapshot();
+    const hit = await this.inspector.hostAt(snap, x, y);
+    if (!hit.fiber || hit.outside) {
+      this.store.set({ selection: undefined });
+      this.addMessage({ id: nextId('n'), role: 'system', level: 'info', text: `That point is covered by ${hit.outside ?? 'something outside the app'}, which can't be inspected.`, ts: Date.now() });
+      return;
+    }
+    const el = elementForHost(snap, hit.fiber);
+    await this.select(snap, el?.fiber ?? hit.fiber, el);
+  }
+
+  /** Move the selection to the enclosing view (skipping wrappers with the same frame). */
+  async selectParent(): Promise<void> {
+    const current = this.selectionHost;
+    if (!current) return;
+    const snap = await this.executor.snapshot();
+    const rect = boundingRect(current);
+    for (let f = current.return; f; f = f.return) {
+      if (f.tag !== FiberTag.HostComponent) continue;
+      const r = boundingRect(f);
+      if (r && rect && r.x === rect.x && r.y === rect.y && r.width === rect.width && r.height === rect.height) continue;
+      const el = snap.internal.elements.find((e) => e.fiber === f || e.fiber === f.alternate);
+      await this.select(snap, f, el && el.role !== 'scrollview' && el.role !== 'list' ? el : undefined);
+      return;
+    }
+  }
+
+  /** Static description plus the layout checks for the element's row. */
+  private describe(snap: Snapshot, host: Fiber, el: InternalElement | undefined): ElementDetails {
+    const details = describeElement(snap, host, el, this.detailsDeps);
+    if (!el) details.findings.push(...layoutFindings(snap, this.detailsDeps, host));
+    return details;
+  }
+
+  /** A snapshot taken after any native screen transition has finished (hit-tests are wrong mid-animation). */
+  private async settledSnapshot(): Promise<Snapshot> {
+    let snap = await this.executor.snapshot();
+    for (let i = 0; i < 15 && snap.transitioning; i++) {
+      await new Promise<void>((r) => setTimeout(() => r(), 100));
+      snap = await this.executor.snapshot();
+    }
+    return snap;
+  }
+
+  private async select(snap: Snapshot, host: Fiber, el: InternalElement | undefined): Promise<void> {
+    this.selectionHost = host;
+    const details = this.describe(snap, host, el);
+    this.store.set({ selection: { details, text: formatDetails(details), resolving: true } });
+    await attachSources(details, host, this.symbolicator, el?.coveredByFiber).catch(() => undefined);
+    if (this.selectionHost !== host) return;
+    this.store.set({ selection: { details, text: formatDetails(details), resolving: false } });
+  }
+
+  /** Details for an agent-supplied target or point, sources included. */
+  private async inspectRpc(p: Record<string, unknown>): Promise<{ details: ElementDetails; text: string }> {
+    const snap = await this.settledSnapshot();
+    let host: Fiber;
+    let el: InternalElement | undefined;
+    const point = p.point as { x?: unknown; y?: unknown } | undefined;
+    if (point && typeof point.x === 'number' && typeof point.y === 'number') {
+      const hit = await this.inspector.hostAt(snap, point.x, point.y);
+      if (!hit.fiber) throw new ToolFailure('NOT_FOUND', `Nothing inspectable at ${point.x},${point.y}: ${hit.outside ?? 'no view'}.`);
+      el = elementForHost(snap, hit.fiber);
+      host = el?.fiber ?? hit.fiber;
+    } else if (p.target === undefined && this.selectionHost) {
+      host = this.selectionHost;
+      el = elementForHost(snap, host);
+    } else {
+      const sel = this.target(p);
+      const m = matchTarget(snap, sel, this.inspector.refs);
+      const any = m.ok ? undefined : this.findAnyHost(snap, sel);
+      if (!m.ok && !any) throw new ToolFailure(m.error.code, m.error.message);
+      el = m.ok ? m.element : undefined;
+      host = m.ok ? m.element.fiber : any!;
+    }
+    const details = this.describe(snap, host, el);
+    if (p.sources !== false) await attachSources(details, host, this.symbolicator, el?.coveredByFiber).catch(() => undefined);
+    return { details, text: formatDetails(details) };
+  }
+
+  /**
+   * Inspection may target any view, not just interactive ones: static texts by ref
+   * (t12) or text, and any view by testID.
+   */
+  private findAnyHost(snap: Snapshot, sel: { ref?: string; testID?: string; text?: string }): Fiber | undefined {
+    if (sel.ref && /^t\d+$/.test(sel.ref)) return snap.internal.texts.find((t) => t.ref === sel.ref)?.fiber;
+    if (sel.testID) {
+      for (const f of snap.internal.hostByTag.values()) if (f.memoizedProps?.testID === sel.testID) return f;
+    }
+    if (sel.text) {
+      const needle = sel.text.toLowerCase();
+      return (snap.internal.texts.find((t) => t.text.toLowerCase() === needle) ?? snap.internal.texts.find((t) => t.text.toLowerCase().includes(needle)))?.fiber;
+    }
+    return undefined;
+  }
+
+  /** Map error stacks to app source lines (at most a few entries per call; cached). */
+  private async withErrorSources(entries: LogEntry[]): Promise<LogEntry[]> {
+    const todo = entries.filter((e) => e.stack && !e.appFrames).slice(-8);
+    await Promise.all(
+      todo.map(async (e) => {
+        const frames = await this.symbolicator.appLocations(parseStack(e.stack));
+        e.appFrames = frames.slice(0, 4).map(formatLocation);
+      }),
+    ).catch(() => undefined);
+    return entries;
+  }
+
+  /** Map the app code that started each request (at most a few entries per call). */
+  private async withInitiators(entries: NetworkEntry[]): Promise<NetworkEntry[]> {
+    const todo = entries.filter((e) => !e.initiator && this.network.stacks.has(e.id)).slice(-10);
+    await Promise.all(
+      todo.map(async (e) => {
+        const frames = await this.symbolicator.appLocations(parseStack(this.network.stacks.get(e.id)));
+        if (frames.length) e.initiator = frames.slice(0, 3).map(formatLocation);
+      }),
+    ).catch(() => undefined);
+    return entries;
   }
 
   cancel(): void {
     this.send({ type: 'chat.cancel' });
     this.inflight.forEach((c) => c.abort());
+  }
+
+  /** Choose the built-in agent's model (undefined = server default); starts a new conversation. */
+  setModel(model: string | undefined): void {
+    this.send({ type: 'chat.config', ...(model ? { model } : {}) });
+    this.currentAssistantId = undefined;
+    this.store.set({ messages: [], lastStats: undefined });
   }
 
   resetChat(): void {
@@ -351,6 +536,14 @@ export class Runtime {
 
   private addMessage(m: ChatMessage): void {
     this.store.set((s) => ({ messages: [...s.messages.slice(-199), m] }));
+  }
+
+  /** Keep screenshot previews for the last three only (each is ~100 KB of base64). */
+  private trimImages(): void {
+    const withImages = this.store.get().messages.filter((m) => m.image);
+    if (withImages.length <= 3) return;
+    const drop = new Set(withImages.slice(0, -3).map((m) => m.id));
+    this.store.set((s) => ({ messages: s.messages.map((m) => (drop.has(m.id) ? { ...m, image: undefined } : m)) }));
   }
 
   private patchMessage(id: string, patch: (m: ChatMessage) => ChatMessage): void {
@@ -420,10 +613,14 @@ export class Runtime {
         if (m.phase === 'start') {
           this.addMessage({ id: `tool-${m.toolId}`, role: 'tool', text: m.summary ?? m.name, ts: Date.now(), turnId: m.turnId, tool: { name: m.name, phase: 'start', summary: m.summary } });
         } else {
+          const shot = this.lastScreenshot;
           this.patchMessage(`tool-${m.toolId}`, (x) => ({
             ...x,
-            tool: { name: m.name, phase: 'end', ok: m.ok, durationMs: m.durationMs, summary: m.summary ?? x.tool?.summary },
+            tool: { name: m.name, phase: 'end', ok: m.ok, durationMs: m.durationMs, summary: m.summary ?? x.tool?.summary, ...(m.detail ? { detail: m.detail } : {}) },
+            // The screenshot this call produced was captured on this device while the row was open.
+            ...(/screenshot/.test(m.name) && m.ok && shot && shot.ts >= x.ts ? { image: { uri: shot.uri, width: shot.width, height: shot.height } } : {}),
           }));
+          if (/screenshot/.test(m.name)) this.trimImages();
         }
         break;
       case 'chat.done':
@@ -581,17 +778,44 @@ export class Runtime {
         errorsOnly: p.errorsOnly === true,
         limit: typeof p.limit === 'number' ? Math.min(p.limit, 200) : 40,
       });
-      return { entries, total: this.logs.buffer.size, dropped: this.logs.buffer.droppedCount };
+      if (p.sources !== false) await this.withErrorSources(entries);
+      return {
+        entries,
+        total: this.logs.buffer.size,
+        dropped: this.logs.buffer.droppedCount,
+        capturedSince: this.logs.installedAt,
+        note: 'Only output after the devtools runtime started is captured; earlier errors (before <AgentDevTools> mounted) are not.',
+      };
     },
-    getNetwork: async (p) => ({
-      entries: this.network.query({
+    getNetwork: async (p) => {
+      const entries = this.network.query({
         failuresOnly: p.failuresOnly === true,
         limit: typeof p.limit === 'number' ? Math.min(p.limit, 100) : 20,
         urlContains: typeof p.urlContains === 'string' ? p.urlContains : undefined,
-      }),
-      pending: this.network.inflightSince(0),
-      note: 'Captures XMLHttpRequest/fetch from JS only. Bodies are captured only when enabled in the app config.',
-    }),
+      });
+      if (p.sources !== false) await this.withInitiators(entries);
+      return {
+        entries,
+        pending: this.network.inflightSince(0),
+        note: 'Captures XMLHttpRequest/fetch from JS only, from when the devtools runtime started. Bodies are captured only when enabled in the app config.',
+      };
+    },
+    inspect: async (p) => this.inspectRpc(p),
+    audit: async () => {
+      const snap = await this.settledSnapshot();
+      const since = Date.now() - 5 * 60_000;
+      const result = auditScreen({
+        snap,
+        deps: this.detailsDeps,
+        errors: this.logs.query({ errorsOnly: true, limit: 50 }).filter((e) => e.ts >= since),
+        requests: this.network.query({ limit: 100 }).filter((e) => e.ts >= since),
+      });
+      return { ...result, text: formatAudit(result) };
+    },
+    getSelection: async () => {
+      const sel = this.store.get().selection;
+      return sel ? { details: sel.details, text: sel.text } : { text: 'The developer has not picked an element (inspect mode is in the chat panel).' };
+    },
     getNavigation: async () => {
       let overlays: unknown[] = [];
       try {
@@ -631,6 +855,7 @@ export class Runtime {
       await this.nextFrame();
       await this.nextFrame();
       const r = await native.captureScreen(maxWidth, quality, boxes, labels);
+      this.lastScreenshot = { uri: `data:${r.mimeType};base64,${r.data}`, width: r.width, height: r.height, ts: Date.now() };
       return { ...r, annotated: boxes.length > 0 };
     } finally {
       this.store.set({ overlayHidden: false });

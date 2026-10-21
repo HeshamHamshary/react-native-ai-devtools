@@ -28,6 +28,8 @@ export class LogCollector {
   private installed = false;
   private reentrant = false;
   private listeners = new Set<(e: LogEntry) => void>();
+  /** When capture started (epoch ms); nothing logged before this is known. */
+  installedAt?: number;
 
   constructor(
     capacity = 500,
@@ -39,6 +41,7 @@ export class LogCollector {
   install(): void {
     if (this.installed) return;
     this.installed = true;
+    this.installedAt = Date.now();
     const c = console as unknown as Record<LogLevel, ConsoleFn>;
     for (const level of LEVELS) {
       const original = c[level];

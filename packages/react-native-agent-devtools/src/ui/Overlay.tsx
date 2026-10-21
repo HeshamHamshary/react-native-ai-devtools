@@ -5,12 +5,16 @@ import type { Runtime } from '../runtime/Runtime';
 import { useStore } from '../utils/Store';
 import { ChatPanel, statusColor } from './ChatPanel';
 import { FloatingButton } from './FloatingButton';
-import { palette } from './theme';
+import { InspectLayer } from './InspectLayer';
+import { palette, type ThemeSetting } from './theme';
 
 interface Props {
   runtime: Runtime;
   initiallyOpen?: boolean;
   launcherIcon?: ReactNode;
+  theme?: ThemeSetting;
+  /** Start with the launcher hidden (e.g. for screenshot tests); the dev menu brings it back. */
+  hideLauncher?: boolean;
 }
 
 /** Visible signal that the agent is driving the app (edge glow + top pill with Stop). */
@@ -30,7 +34,7 @@ function ControlIndicator({ runtime, top, color }: { runtime: Runtime; top: numb
     <>
       <Animated.View pointerEvents="none" style={[StyleSheet.absoluteFill, styles.glow, { borderColor: color, opacity: pulse }]} />
       <View style={[styles.pill, { top: top + 4, backgroundColor: color }]}>
-        <Text style={styles.pillText}>Agent is controlling the app</Text>
+        <Text style={styles.pillText}>Agent is operating the app</Text>
         <Pressable accessibilityRole="button" accessibilityLabel="Stop agent" hitSlop={8} onPress={() => runtime.cancel()} style={styles.pillStop}>
           <Text style={[styles.pillStopText, { color }]}>Stop</Text>
         </Pressable>
@@ -39,11 +43,13 @@ function ControlIndicator({ runtime, top, color }: { runtime: Runtime; top: numb
   );
 }
 
-export function Overlay({ runtime, initiallyOpen = false, launcherIcon }: Props) {
-  const dark = useColorScheme() === 'dark';
-  const p = palette(dark);
+export function Overlay({ runtime, initiallyOpen = false, launcherIcon, theme = 'system', hideLauncher = false }: Props) {
+  const system = useColorScheme();
+  const p = palette(theme === 'system' ? system === 'dark' : theme === 'dark');
   const [open, setOpen] = useState(initiallyOpen);
-  const [launcherHidden, setLauncherHidden] = useState(false);
+  const [launcherHidden, setLauncherHidden] = useState(hideLauncher);
+  const [attach, setAttach] = useState(false);
+  const inspecting = useStore(runtime.store, (s) => s.inspecting);
   const [expandedDuringTurn, setExpandedDuringTurn] = useState(false);
   const [insets, setInsets] = useState({ top: 0, bottom: 0, left: 0, right: 0 });
   const connection = useStore(runtime.store, (s) => s.connection);
@@ -69,6 +75,24 @@ export function Overlay({ runtime, initiallyOpen = false, launcherIcon }: Props)
   useEffect(() => {
     if (open) setSeen(messageCount);
   }, [open, messageCount]);
+
+  // The panel would cover the app while picking an element.
+  useEffect(() => {
+    if (inspecting) setOpen(false);
+  }, [inspecting]);
+
+  const onAsk = useCallback(
+    (question?: string) => {
+      if (question) {
+        runtime.sendChat(question, true);
+        setAttach(false);
+      } else {
+        setAttach(true);
+      }
+      setOpen(true);
+    },
+    [runtime],
+  );
 
   // Approval requests must be visible even if the chat was closed.
   useEffect(() => {
@@ -100,12 +124,15 @@ export function Overlay({ runtime, initiallyOpen = false, launcherIcon }: Props)
   return (
     <View pointerEvents="box-none" style={StyleSheet.absoluteFill}>
       {busy && actedThisTurn ? <ControlIndicator runtime={runtime} top={insets.top} color={p.accent} /> : null}
+      {!open ? <InspectLayer runtime={runtime} palette={p} insets={insets} onAsk={onAsk} /> : null}
       {open ? (
         <ChatPanel
           runtime={runtime}
           palette={p}
           insets={insets}
           collapsed={collapsed}
+          attach={attach}
+          onAttachChange={setAttach}
           onExpand={() => setExpandedDuringTurn(true)}
           onClose={() => setOpen(false)}
           onHideLauncher={() => {
@@ -114,10 +141,9 @@ export function Overlay({ runtime, initiallyOpen = false, launcherIcon }: Props)
           }}
         />
       ) : null}
-      {!open && !launcherHidden ? (
+      {!open && !launcherHidden && !inspecting ? (
         <FloatingButton
           palette={p}
-          dark={dark}
           insets={insets}
           busy={busy}
           statusColor={statusColor(connection, p)}

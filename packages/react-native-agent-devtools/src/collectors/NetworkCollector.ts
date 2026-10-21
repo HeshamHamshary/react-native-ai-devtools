@@ -42,6 +42,8 @@ export class NetworkCollector {
   private origOpen?: (...a: unknown[]) => unknown;
   private origSend?: (...a: unknown[]) => unknown;
   private pending = new Map<number, NetworkEntry>();
+  /** JS stack at the moment each request was sent, by entry id (kept as long as the entry). */
+  readonly stacks = new Map<number, string>();
 
   constructor(
     private readonly opts: NetworkOptions = {},
@@ -108,6 +110,10 @@ export class NetworkCollector {
     };
     this.buffer.push(entry);
     this.pending.set(entry.id, entry);
+    // The app code that issued the request is on the stack right now (fetch calls send synchronously).
+    const stack = new Error().stack;
+    if (stack) this.stacks.set(entry.id, stack);
+    if (this.stacks.size > (this.opts.capacity ?? 300)) this.stacks.delete(this.stacks.keys().next().value!);
 
     let failure: string | undefined;
     const mark = (reason: string) => () => {

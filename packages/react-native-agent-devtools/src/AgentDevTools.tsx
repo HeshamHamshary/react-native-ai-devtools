@@ -28,6 +28,13 @@ export interface AgentDevToolsProps {
   initiallyOpen?: boolean;
   /** Replace the launcher icon. */
   launcherIcon?: ReactNode;
+  /** Color theme of the devtools UI (default: follow the system). */
+  theme?: 'system' | 'light' | 'dark';
+  /**
+   * Start with the floating launcher hidden, e.g. while screenshot or UI tests run.
+   * The dev menu item "Show Agent DevTools" brings it back; the server connection stays up.
+   */
+  hideLauncher?: boolean;
 }
 
 let activeRuntime: Runtime | undefined;
@@ -77,7 +84,7 @@ function AgentDevToolsInner(props: AgentDevToolsProps) {
         <Anchor ref={rt.setAppAnchor}>{props.children}</Anchor>
       </Profiler>
       <Anchor ref={rt.setOverlayAnchor}>
-        <Overlay runtime={rt} initiallyOpen={props.initiallyOpen} launcherIcon={props.launcherIcon} />
+        <Overlay runtime={rt} initiallyOpen={props.initiallyOpen} launcherIcon={props.launcherIcon} theme={props.theme} hideLauncher={props.hideLauncher} />
       </Anchor>
     </View>
   );

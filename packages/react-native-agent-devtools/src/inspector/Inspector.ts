@@ -21,11 +21,14 @@ export interface InternalElement extends UIElement {
   route?: RouteInfo;
   /** Declared with <AgentTarget>; activation goes through its onActivate callback. */
   explicit?: boolean;
+  /** The view a real touch at the center lands on instead, when it is in the React tree. */
+  coveredByFiber?: Fiber;
 }
 
 export interface InternalText {
   ref: string;
   text: string;
+  testID?: string;
   bounds?: Rect;
   visible: boolean;
   header: boolean;
@@ -385,6 +388,7 @@ export class Inspector {
           const t: InternalText = {
             ref: '',
             text,
+            ...(typeof props.testID === 'string' ? { testID: props.testID } : {}),
             visible: !!clipped,
             header: a11yRole === 'header',
             fiber: f,
@@ -558,7 +562,11 @@ export class Inspector {
           if (hit !== undefined && hit >= 0 && el.visible) {
             const covering = this.coveringHost(el, hit, hostByTag, overlayTags);
             el.hittable = covering === null;
-            if (covering) el.coveredBy = covering;
+            if (covering) {
+              el.coveredBy = covering;
+              const coverFiber = hostByTag.get(hit);
+              if (coverFiber) el.coveredByFiber = coverFiber;
+            }
           }
         });
         if (hiddenScreens.size) {
@@ -664,6 +672,35 @@ export class Inspector {
     void walkMs;
     this.last = snap;
     return snap;
+  }
+
+  /**
+   * The host view a real touch at window point (x, y) lands on, using the platform's
+   * own hit-testing. Probes from the topmost visible modal when one is open (on
+   * Android a modal is a separate window).
+   */
+  async hostAt(snap: Snapshot, x: number, y: number): Promise<{ fiber?: Fiber; hitTag: number; outside?: string }> {
+    if (!this.deps.probe) throw new Error('Point inspection needs the native module (rebuild the app).');
+    const modal = [...snap.internal.elements].reverse().find((e) => e.role === 'modal' && e.visible && e.tag !== undefined);
+    let anchor: Fiber | undefined = modal?.fiber;
+    if (!anchor) {
+      const stack: Fiber[] = this.getRoot()?.child ? [this.getRoot()!.child!] : [];
+      while (stack.length && !anchor) {
+        const f = stack.shift()!;
+        if (f.tag === FiberTag.HostComponent && nativeTagOf(f) !== undefined) anchor = f;
+        else for (let c = f.child; c; c = c.sibling) stack.push(c);
+      }
+    }
+    const tag = anchor ? nativeTagOf(anchor) : undefined;
+    const rect = anchor ? this.deps.measure(anchor) : undefined;
+    if (!anchor || tag === undefined || !rect) throw new Error('The app has no measurable root view yet.');
+    const res = await this.deps.probe([tag], [Math.max(0, x - rect.x), Math.max(0, y - rect.y)]);
+    const hitTag = res.hit[0] ?? -1;
+    if (hitTag <= 0) return { hitTag, outside: 'another window or a non-React view (dialog, keyboard, LogBox or system UI)' };
+    if (this.deps.overlayTags?.().has(hitTag)) return { hitTag, outside: 'the devtools overlay' };
+    const fiber = snap.internal.hostByTag.get(hitTag) ?? this.findHostOutsideApp(hitTag);
+    if (!fiber) return { hitTag, outside: `view #${hitTag} outside the inspected app tree` };
+    return { fiber, hitTag, ...(snap.internal.hostByTag.has(hitTag) ? {} : { outside: describeFiber(fiber) }) };
   }
 
   /** Describe what covers `el` when a real touch at its center would land on `hitTag`. */

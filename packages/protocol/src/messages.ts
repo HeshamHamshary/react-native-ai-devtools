@@ -22,6 +22,9 @@ export const RPC_METHODS = [
   'getNetwork',
   'getNavigation',
   'getPerf',
+  'inspect',
+  'audit',
+  'getSelection',
 ] as const;
 
 export type RpcMethod = (typeof RPC_METHODS)[number];
@@ -77,9 +80,12 @@ export type ClientMessage =
       capabilities: CapabilityMap;
       auth?: { token?: string; pairingCode?: string };
     }
-  | { type: 'chat.send'; id: string; text: string }
+  /** `context.selection`: the element the developer picked in inspect mode, as text. */
+  | { type: 'chat.send'; id: string; text: string; context?: { selection?: string } }
   | { type: 'chat.cancel' }
   | { type: 'chat.reset' }
+  /** Choose the in-app agent's model for this device (`undefined` = server default). Starts a new conversation. */
+  | { type: 'chat.config'; model?: string }
   | { type: 'rpc.result'; id: string; ok: true; result: unknown; deviceMs?: number }
   | { type: 'rpc.result'; id: string; ok: false; error: ToolError; deviceMs?: number }
   | { type: 'approval.response'; id: string; approved: boolean }
@@ -110,6 +116,8 @@ export type ServerMessage =
       summary?: string;
       ok?: boolean;
       durationMs?: number;
+      /** First part of the tool's text output (redacted), shown when the row is expanded. */
+      detail?: string;
     }
   | { type: 'chat.done'; turnId: string; ok: boolean; error?: string; stats?: TurnStats }
   | { type: 'chat.error'; message: string; code?: string }
@@ -178,11 +186,24 @@ export function parseClientMessage(raw: unknown): Parsed<ClientMessage> {
     case 'chat.send':
       if (!isStr(m.id, 64)) return { ok: false, error: 'chat.send: invalid id' };
       if (!isStr(m.text, MAX_CHAT_TEXT)) return { ok: false, error: 'chat.send: text must be 1..8000 chars' };
+      if (m.context !== undefined) {
+        if (!isObj(m.context) || (m.context.selection !== undefined && !isStr(m.context.selection, MAX_CHAT_TEXT))) {
+          return { ok: false, error: 'chat.send: invalid context' };
+        }
+        if (typeof m.context.selection === 'string') {
+          return { ok: true, msg: { type: 'chat.send', id: m.id, text: m.text, context: { selection: m.context.selection } } };
+        }
+      }
       return { ok: true, msg: { type: 'chat.send', id: m.id, text: m.text } };
     case 'chat.cancel':
     case 'chat.reset':
     case 'setup.open':
       return { ok: true, msg: { type: m.type } };
+    case 'chat.config':
+      if (m.model !== undefined && (typeof m.model !== 'string' || !/^[A-Za-z0-9._\-[\]]{1,64}$/.test(m.model))) {
+        return { ok: false, error: 'chat.config: invalid model' };
+      }
+      return { ok: true, msg: { type: 'chat.config', ...(m.model ? { model: m.model } : {}) } };
     case 'rpc.result': {
       if (!isStr(m.id, 64)) return { ok: false, error: 'rpc.result: invalid id' };
       const deviceMs = typeof m.deviceMs === 'number' ? m.deviceMs : undefined;

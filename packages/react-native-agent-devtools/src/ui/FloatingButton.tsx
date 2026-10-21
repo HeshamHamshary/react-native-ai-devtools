@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useRef, type ReactNode } from 'react';
 import { Animated, Easing, PanResponder, StyleSheet, View, useWindowDimensions } from 'react-native';
-import { ClaudeMark } from './ClaudeMark';
+import { Mark } from './Mark';
 import type { Palette } from './theme';
 
-const SIZE = 52;
+const SIZE = 48;
 const MARGIN = 12;
 
 interface Props {
@@ -15,11 +15,10 @@ interface Props {
   onPress: () => void;
   onLongPress: () => void;
   icon?: ReactNode;
-  dark: boolean;
 }
 
 /** Draggable launcher that snaps to the nearest horizontal edge inside the safe area. */
-export function FloatingButton({ palette: p, insets, busy, statusColor, unread, onPress, onLongPress, icon, dark }: Props) {
+export function FloatingButton({ palette: p, insets, busy, statusColor, unread, onPress, onLongPress, icon }: Props) {
   const { width, height } = useWindowDimensions();
   const minY = insets.top + MARGIN;
   const maxY = height - insets.bottom - SIZE - MARGIN - 40;
@@ -102,13 +101,11 @@ export function FloatingButton({ palette: p, insets, busy, statusColor, unread, 
       {...responder.panHandlers}
       accessibilityRole="button"
       accessibilityLabel="Open agent devtools"
-      style={[
-        styles.button,
-        { backgroundColor: dark ? '#262624' : '#FAF9F5', borderColor: p.border, transform: pos.getTranslateTransform() },
-      ]}
+      accessibilityHint="Drag to move. Long-press to hide."
+      style={[styles.button, { backgroundColor: p.launcher, borderColor: p.border, transform: pos.getTranslateTransform() }]}
     >
-      <Animated.View style={busy ? { transform: [{ rotate }] } : undefined}>{icon ?? <ClaudeMark size={30} />}</Animated.View>
-      <View style={[styles.dot, { backgroundColor: statusColor, borderColor: dark ? '#262624' : '#FAF9F5' }]} />
+      <Animated.View style={busy ? { transform: [{ rotate }] } : undefined}>{icon ?? <Mark size={26} color={p.accent} />}</Animated.View>
+      <View style={[styles.dot, { backgroundColor: statusColor, borderColor: p.launcher }]} />
       {unread ? <View style={[styles.unread, { backgroundColor: p.accent }]} /> : null}
     </Animated.View>
   );

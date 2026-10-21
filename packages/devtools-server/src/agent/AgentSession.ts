@@ -14,11 +14,12 @@ import {
 import type { TurnStats } from 'react-native-agent-devtools-protocol';
 import { redactText } from 'react-native-agent-devtools-protocol';
 import type { RepoAccess } from '../security/repoAccess.ts';
+import { toolDetail } from '../tools/format.ts';
 import { CONTROL_TOOLS, MOBILE_TOOLS } from '../tools/mobileTools.ts';
 import type { DeviceSession } from '../transport/devices.ts';
 import { agentEnv, agentSettings, authDecision, type AuthMode } from './credentials.ts';
 import { AsyncQueue } from './AsyncQueue.ts';
-import { appStateBlock, systemPrompt } from './prompt.ts';
+import { appStateBlock, selectionBlock, systemPrompt } from './prompt.ts';
 
 export interface AgentConfig {
   /** The credential source the developer chose; the session refuses any other. */
@@ -71,6 +72,7 @@ interface Turn {
 }
 
 const MOBILE_PREFIX = 'mcp__mobile__';
+
 
 function toolSummary(name: string, input: Record<string, unknown>): string {
   const short = name.startsWith(MOBILE_PREFIX) ? name.slice(MOBILE_PREFIX.length) : name;
@@ -209,7 +211,7 @@ export class AgentSession {
     });
   }
 
-  async send(text: string, turnId: string): Promise<void> {
+  async send(text: string, turnId: string, context?: { selection?: string }): Promise<void> {
     const auth = await this.ready;
     if (!auth?.ok || this.closed) {
       this.device.send({ type: 'chat.error', message: `Agent unavailable: ${auth?.reason ?? 'session closed'}`, code: 'AGENT_UNAVAILABLE' });
@@ -229,7 +231,7 @@ export class AgentSession {
     }
     this.queue.push({
       type: 'user',
-      message: { role: 'user', content: `${appStateBlock(summary, note)}\n\n${text}` },
+      message: { role: 'user', content: `${appStateBlock(summary, note)}\n\n${selectionBlock(context?.selection)}${text}` },
       parent_tool_use_id: null,
     });
   }
@@ -353,12 +355,13 @@ export class AgentSession {
         if (!Array.isArray(content)) return;
         for (const block of content) {
           if (typeof block !== 'object' || block === null || (block as { type?: string }).type !== 'tool_result') continue;
-          const b = block as { tool_use_id: string; is_error?: boolean };
+          const b = block as { tool_use_id: string; is_error?: boolean; content?: unknown };
           const started = turn.tools.get(b.tool_use_id);
           if (!started) continue;
           const durationMs = Math.round(performance.now() - started.t0);
           turn.toolMs += durationMs;
-          this.device.send({ type: 'chat.tool', turnId: turn.id, toolId: b.tool_use_id, name: started.name, phase: 'end', ok: !b.is_error, durationMs });
+          const detail = toolDetail(b.content);
+          this.device.send({ type: 'chat.tool', turnId: turn.id, toolId: b.tool_use_id, name: started.name, phase: 'end', ok: !b.is_error, durationMs, ...(detail ? { detail } : {}) });
           if (started.control) this.device.send({ type: 'chat.status', state: 'thinking', turnId: turn.id });
         }
         return;

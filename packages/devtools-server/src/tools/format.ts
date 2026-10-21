@@ -1,4 +1,5 @@
 import type { ActionResult, LogEntry, NetworkEntry } from 'react-native-agent-devtools-protocol';
+import { redactText } from 'react-native-agent-devtools-protocol';
 
 const ago = (ts: number) => {
   const s = Math.max(0, Math.round((Date.now() - ts) / 1000));
@@ -68,26 +69,39 @@ export function formatSequence(r: SequenceResult): string {
   return lines.join('\n');
 }
 
-export function formatLogs(entries: LogEntry[], total: number, dropped: number): string {
-  if (!entries.length) return `No matching log entries (buffer: ${total} entries${dropped ? `, ${dropped} older dropped` : ''}).`;
+export function formatLogs(entries: LogEntry[], total: number, dropped: number, capturedSince?: number): string {
+  const since = capturedSince ? ` Capture started ${ago(capturedSince)}; anything earlier is unknown.` : '';
+  if (!entries.length) return `No matching log entries (buffer: ${total} entries${dropped ? `, ${dropped} older dropped` : ''}).${since}`;
   const lines = entries.map((e) => {
     const repeat = e.repeat ? ` ×${e.repeat}` : '';
     const where = e.route ? ` [${e.route}]` : '';
-    const stack = e.stack && e.level === 'error' ? `\n    ${e.stack.split('\n').slice(0, 4).join('\n    ')}` : '';
-    return `${ago(e.ts)} ${e.level.toUpperCase()} (${e.source})${where}${repeat}: ${e.message}${stack}`;
+    const frames = e.appFrames?.length
+      ? `\n    ${e.appFrames.map((f) => `at ${f}`).join('\n    ')}`
+      : e.stack && e.level === 'error'
+        ? `\n    ${e.stack.split('\n').slice(0, 4).join('\n    ')}`
+        : '';
+    return `${ago(e.ts)} ${e.level.toUpperCase()} (${e.source})${where}${repeat}: ${e.message}${frames}`;
   });
-  return `${entries.length} entr${entries.length === 1 ? 'y' : 'ies'} (oldest first):\n${lines.join('\n')}`;
+  return `${entries.length} entr${entries.length === 1 ? 'y' : 'ies'} (oldest first):${since}\n${lines.join('\n')}`;
 }
 
 export function formatNetwork(entries: NetworkEntry[], pending: number): string {
   if (!entries.length) return `No matching requests captured (in flight: ${pending}).`;
   const lines = entries.map((n) => {
-    const status = n.pending ? 'pending' : n.error ? `FAILED ${n.status ?? 0} (${n.error})` : String(n.status);
+    const status = n.pending ? 'pending' : n.error ? `FAILED ${n.status ?? 0} (${n.error})` : n.ok === false ? `${n.status} (HTTP error)` : String(n.status);
     const extra = [n.durationMs !== undefined ? `${n.durationMs}ms` : '', n.route ? `on ${n.route}` : '', n.responseType ?? '']
       .filter(Boolean)
       .join(', ');
     const bodies = [n.requestBody ? `\n    request: ${n.requestBody}` : '', n.responseBody ? `\n    response: ${n.responseBody}` : ''].join('');
-    return `${ago(n.ts)} ${n.method} ${n.url} → ${status}${extra ? ` (${extra})` : ''}${bodies}`;
+    const initiator = n.initiator?.length ? `\n    started by ${n.initiator.join(' ← ')}` : '';
+    return `${ago(n.ts)} ${n.method} ${n.url} → ${status}${extra ? ` (${extra})` : ''}${initiator}${bodies}`;
   });
   return `${entries.length} request(s), in flight: ${pending}\n${lines.join('\n')}`;
+}
+
+/** Text part of a tool result, redacted and shortened, for the expandable tool row in the app. */
+export function toolDetail(content: unknown): string | undefined {
+  const parts = typeof content === 'string' ? [content] : Array.isArray(content) ? content.flatMap((c) => (c && typeof c === 'object' && (c as { type?: string }).type === 'text' ? [String((c as { text?: unknown }).text ?? '')] : [])) : [];
+  const text = parts.join('\n').trim();
+  return text ? redactText(text).slice(0, 1_200) : undefined;
 }
