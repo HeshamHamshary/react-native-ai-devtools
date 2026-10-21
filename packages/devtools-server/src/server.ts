@@ -112,7 +112,7 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
   let authRejected: string | undefined;
   let authNotices: string[] = [];
   const computeAvailability = async (): Promise<Availability> => {
-    if (opts.demoAgent) return { available: true, source: 'demo agent (scripted, no model)' };
+    if (opts.demoAgent) return { available: true, source: 'demo agent, no model' };
     if (hub.chatAvailable) return { available: true, source: 'your Claude Code session (channel)', via: 'claude-code' };
     if (opts.agentAvailable) return opts.agentAvailable;
     if (!opts.agent) return { available: false, reason: 'agent disabled (--no-agent)' };

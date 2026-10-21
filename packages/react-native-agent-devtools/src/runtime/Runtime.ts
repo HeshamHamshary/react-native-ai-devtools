@@ -36,7 +36,8 @@ export const LIBRARY_VERSION = '0.1.0';
 
 /** Short title for a picked element, e.g. `Pressable "Log in" · LoginScreen.tsx:88`. */
 export function selectionTitle(d: ElementDetails): string {
-  const name = d.source?.element ?? d.component ?? d.host.type;
+  // Interactive elements by the app component that renders them; plain views by their element.
+  const name = (d.ref ? (d.component ?? d.source?.element) : (d.source?.element ?? d.component)) ?? d.host.type.replace(/^RCT/, '');
   const label = d.label ?? d.host.testID;
   const where = d.source ? ` · ${d.source.file.split('/').pop()}:${d.source.line}` : '';
   return `${name}${label ? ` "${label}"` : ''}${where}`;

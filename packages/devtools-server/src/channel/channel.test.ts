@@ -95,6 +95,11 @@ test('the bridge speaks the channel contract and routes the app chat through Cla
     assert.equal(meta.platform, 'ios');
     assert.match(String(event.params?.content), /<app_state[\s\S]*Login screen[\s\S]*<\/app_state>\s+What screen am I on\?$/);
 
+    // A picked element rides along with the message.
+    d.send({ type: 'chat.send', id: 'u1b', text: 'Why?', context: { selection: 'e5 button "Log in"' } });
+    // (the first turn is still open; this one is refused as busy)
+    assert.equal((await d.next('chat.error')).code, 'BUSY');
+
     // Tool calls run on the device that asked and show up as tool rows.
     const shot = await client.callTool({ name: 'mobile_get_screen', arguments: {} });
     assert.match(JSON.stringify(shot.content), /Login screen/);

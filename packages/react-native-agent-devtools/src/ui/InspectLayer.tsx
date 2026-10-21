@@ -3,6 +3,7 @@ import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, View, type 
 import type { Runtime, Selection } from '../runtime/Runtime';
 import { selectionTitle } from '../runtime/Runtime';
 import { useStore } from '../utils/Store';
+import { Mark } from './Mark';
 import { mono, radius, type Palette } from './theme';
 
 const nextFrame = () => new Promise<void>((r) => requestAnimationFrame(() => r()));
@@ -55,7 +56,7 @@ export function InspectLayer({ runtime, palette: p, insets, onAsk }: Props) {
             style={[StyleSheet.absoluteFill, { backgroundColor: p.accentFill }]}
           />
           <View style={[styles.banner, { top: insets.top + 8, backgroundColor: p.bg, borderColor: p.border }]}>
-            {busy ? <ActivityIndicator size="small" color={p.accent} /> : <Text style={[styles.bannerGlyph, { color: p.accent }]}>⌖</Text>}
+            {busy ? <ActivityIndicator size="small" color={p.accent} /> : <Mark size={16} color={p.accent} />}
             <Text style={[styles.bannerText, { color: p.text }]}>{busy ? 'Inspecting…' : 'Tap any element to inspect it'}</Text>
             <Pressable accessibilityRole="button" hitSlop={10} onPress={() => runtime.stopInspect()}>
               <Text style={[styles.link, { color: p.accent }]}>Cancel</Text>
@@ -167,7 +168,6 @@ const styles = StyleSheet.create({
     shadowOffset: { width: 0, height: 2 },
     elevation: 8,
   },
-  bannerGlyph: { fontSize: 16, fontWeight: '700' },
   bannerText: { fontSize: 13.5, fontWeight: '600' },
   link: { fontSize: 13.5, fontWeight: '700' },
   highlight: { position: 'absolute', borderWidth: 2, borderRadius: 4 },

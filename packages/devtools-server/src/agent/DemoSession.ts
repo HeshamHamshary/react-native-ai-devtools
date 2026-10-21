@@ -18,7 +18,7 @@ export class DemoSession {
   }
 
   get modelName(): string {
-    return 'demo (scripted, no model)';
+    return 'scripted';
   }
 
   async send(text: string, turnId: string, context?: { selection?: string }): Promise<void> {

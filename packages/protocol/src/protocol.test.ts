@@ -130,6 +130,16 @@ test('redactText removes well-known API key formats, even short test keys', () =
   assert.ok(s.includes('using'));
 });
 
+test('chat.send context and chat.config are validated', () => {
+  const ok = parseClientMessage(JSON.stringify({ type: 'chat.send', id: 'a', text: 'Why?', context: { selection: 'e5 button', extra: 1 } }));
+  assert.ok(ok.ok && ok.msg.type === 'chat.send');
+  assert.deepEqual(ok.ok && ok.msg, { type: 'chat.send', id: 'a', text: 'Why?', context: { selection: 'e5 button' } });
+  assert.equal(parseClientMessage(JSON.stringify({ type: 'chat.send', id: 'a', text: 'x', context: { selection: 5 } })).ok, false);
+  assert.deepEqual(parseClientMessage(JSON.stringify({ type: 'chat.config', model: 'claude-sonnet-5-5' })), { ok: true, msg: { type: 'chat.config', model: 'claude-sonnet-5-5' } });
+  assert.deepEqual(parseClientMessage(JSON.stringify({ type: 'chat.config' })), { ok: true, msg: { type: 'chat.config' } });
+  assert.equal(parseClientMessage(JSON.stringify({ type: 'chat.config', model: 'x; rm -rf /' })).ok, false);
+});
+
 test('chat.notice and welcome.trusted are validated', () => {
   const n = parseServerMessage(JSON.stringify({ type: 'chat.notice', text: 'Approve in your terminal', level: 'bogus', extra: 1 }));
   assert.ok(n.ok);

@@ -418,3 +418,56 @@ test('secrets never reach logs or the device', async () => {
   assert.ok(!all.includes(secret.slice(0, 24)), 'API key never logged or sent');
   assert.ok(!all.includes('hunter2'));
 });
+
+test('the picked element travels with the message; the app can switch the model', async () => {
+  const sent: { text: string; context?: { selection?: string } }[] = [];
+  const s = await startServer(
+    options({
+      mcp: false,
+      agentAvailable: { available: true },
+      sessionFactory: () =>
+        ({ busy: false, modelName: undefined, send: async (text: string, _id: string, context?: { selection?: string }) => void sent.push({ text, context }), interrupt: async () => {}, close() {} }) as never,
+    }),
+  );
+  try {
+    const d = new FakeDevice(`ws://127.0.0.1:${s.port}`);
+    await d.opened();
+    d.hello();
+    await d.next('welcome');
+    d.send({ type: 'chat.send', id: 'm1', text: "Why doesn't this work?", context: { selection: 'e5 button "Log in" <PrimaryButton>' } });
+    await new Promise((r) => setTimeout(r, 50));
+    assert.deepEqual(sent[0], { text: "Why doesn't this work?", context: { selection: 'e5 button "Log in" <PrimaryButton>' } });
+
+    d.send({ type: 'chat.config', model: 'sonnet' });
+    assert.equal((await d.next('welcome')).server.agent.model, 'sonnet');
+    d.send({ type: 'chat.config' });
+    assert.equal((await d.next('welcome')).server.agent.model, undefined, 'back to the server default');
+    d.close();
+  } finally {
+    await s.close();
+  }
+});
+
+test('MCP exposes inspect and audit backed by the device', async () => {
+  const d = await connect();
+  d.handlers.inspect = (p) => ({ text: `inspected ${JSON.stringify(p)}` });
+  d.handlers.audit = () => ({ text: 'audit of Login: 1 finding(s)' });
+  const post = async (body: unknown) =>
+    (await (
+      await fetch(`http://${base}/mcp`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream', ...authed() },
+        body: JSON.stringify(body),
+      })
+    ).json()) as { result?: { content?: { text: string }[] } };
+  await post({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 't', version: '1' } } });
+  const a = await post({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'mobile_inspect', arguments: { target: '#login-submit' } } });
+  assert.equal(a.result?.content?.[0]?.text, 'inspected {"target":"#login-submit"}');
+  const sel = await post({ jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'mobile_inspect', arguments: {} } });
+  assert.equal(sel.result?.content?.[0]?.text, 'inspected {}', 'no target: the developer\'s selection');
+  const pt = await post({ jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: 'mobile_inspect', arguments: { x: 10, y: 20 } } });
+  assert.equal(pt.result?.content?.[0]?.text, 'inspected {"point":{"x":10,"y":20}}');
+  const au = await post({ jsonrpc: '2.0', id: 5, method: 'tools/call', params: { name: 'mobile_audit_screen', arguments: {} } });
+  assert.match(au.result?.content?.[0]?.text ?? '', /audit of Login/);
+  d.close();
+});

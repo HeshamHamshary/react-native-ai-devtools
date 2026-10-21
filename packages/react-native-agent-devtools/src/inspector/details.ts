@@ -59,11 +59,11 @@ function styleSummary(style: Record<string, unknown> | undefined): Record<string
   return Object.keys(out).length ? out : undefined;
 }
 
-/** The outermost composite directly wrapping a host view: the component the app wrote (e.g. <Pressable>). */
-function wrapperOf(host: Fiber): Fiber | undefined {
-  let wrapper: Fiber | undefined;
-  for (let f = host.return; f && isComposite(f); f = f.return) wrapper = f;
-  return wrapper;
+/** Components directly wrapping a host view (up to the parent view), outermost first: the outermost is what the app wrote. */
+function wrappersOf(host: Fiber): Fiber[] {
+  const out: Fiber[] = [];
+  for (let f = host.return; f && f.tag !== FiberTag.HostComponent && f.tag !== FiberTag.HostRoot; f = f.return) if (isComposite(f)) out.unshift(f);
+  return out;
 }
 
 /**
@@ -72,7 +72,8 @@ function wrapperOf(host: Fiber): Fiber | undefined {
  */
 export function describeElement(snap: Snapshot, host: Fiber, el: InternalElement | undefined, deps: DetailsDeps): ElementDetails {
   const hostProps = host.memoizedProps ?? {};
-  const wrapper = wrapperOf(host);
+  const wrappers = wrappersOf(host);
+  const wrapper = wrappers[0];
   const wrapperProps = wrapper?.memoizedProps ?? {};
   const style = hostProps.style ? deps.flattenStyle(hostProps.style) : undefined;
   const measured = el?.bounds ?? deps.measure(host);
@@ -102,12 +103,8 @@ export function describeElement(snap: Snapshot, host: Fiber, el: InternalElement
 
   const handlers: ElementDetails['handlers'] = [];
   const seen = new Set<string>();
-  for (const [fiber, p] of [
-    [wrapper, wrapperProps],
-    [host, hostProps],
-  ] as const) {
-    if (!fiber) continue;
-    for (const [k, v] of Object.entries(p)) {
+  for (const fiber of [...wrappers, host]) {
+    for (const [k, v] of Object.entries(fiber.memoizedProps ?? {})) {
       if (typeof v !== 'function' || !HANDLER.test(k) || PLUMBING.test(k) || seen.has(k)) continue;
       seen.add(k);
       const fnName = (v as { name?: string }).name;

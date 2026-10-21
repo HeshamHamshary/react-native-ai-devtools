@@ -140,3 +140,10 @@ test('regression for the credential incident: a shell API key is never used impl
     assert.deepEqual(await verifyAgentAuth('api-key'), { ok: true, source: 'ANTHROPIC_API_KEY' });
   });
 });
+
+test('tool output previews for the app are redacted and bounded', async () => {
+  const { toolDetail } = await import('../tools/format.ts');
+  const out = toolDetail([{ type: 'text', text: `token=abc123secret ${'x'.repeat(2000)}` }, { type: 'image', data: 'AAAA' }]);
+  assert.ok(out && !out.includes('abc123secret') && out.length <= 1200);
+  assert.equal(toolDetail([{ type: 'image', data: 'AAAA' }]), undefined);
+});

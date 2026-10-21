@@ -147,7 +147,7 @@ export function ChatPanel({ runtime, palette: p, insets, collapsed, attach, onAt
             </Text>
           </View>
         </View>
-        <HeaderButton label="Inspect an element" glyph="⌖" p={p} active={state.inspecting} onPress={() => (state.inspecting ? runtime.stopInspect() : runtime.startInspect())} />
+        <HeaderButton label="Inspect an element" glyph="mark" p={p} active={state.inspecting} onPress={() => (state.inspecting ? runtime.stopInspect() : runtime.startInspect())} />
         <HeaderButton label="New chat" glyph="＋" p={p} onPress={() => runtime.resetChat()} />
         <HeaderButton label="More" glyph="⋯" p={p} active={menu} onPress={() => setMenu((v) => !v)} />
         <HeaderButton label="Close" glyph="✕" p={p} onPress={onClose} />
@@ -188,13 +188,16 @@ export function ChatPanel({ runtime, palette: p, insets, collapsed, attach, onAt
         }}
       >
         {needsSetup ? (
-          <SetUp p={p} setup={state.setup} canSetup={state.server?.agent.setup === true} reason={state.server?.agent.reason} onSetup={() => runtime.openSetup()} />
+          <View style={styles.setupWrap}>
+            <SetUp p={p} setup={state.setup} canSetup={state.server?.agent.setup === true} reason={state.server?.agent.reason} onSetup={() => runtime.openSetup()} />
+            <View style={[styles.divider, { backgroundColor: p.border }]} />
+            <Text style={[styles.note, { color: p.muted }]}>Inspecting works without a model:</Text>
+            <InspectButton p={p} center onPress={() => runtime.startInspect()} />
+          </View>
         ) : state.messages.length === 0 ? (
           <View style={styles.empty}>
             <Text style={[styles.emptyTitle, { color: p.text }]}>Ask about this screen, or tell the agent what to do.</Text>
-            <Pressable accessibilityRole="button" onPress={() => runtime.startInspect()} style={[styles.inspectCta, { borderColor: p.accent, backgroundColor: p.accentFill }]}>
-              <Text style={[styles.inspectCtaText, { color: p.accent }]}>⌖ Inspect an element</Text>
-            </Pressable>
+            <InspectButton p={p} onPress={() => runtime.startInspect()} />
             <View style={styles.chips}>
               {SUGGESTIONS.map((s) => (
                 <Pressable key={s} accessibilityRole="button" onPress={() => send(s)} disabled={state.connection !== 'connected'} style={[styles.chip, { borderColor: p.border }]}>
@@ -391,6 +394,20 @@ function Diagnostics({ runtime, state, p }: { runtime: Runtime; state: UIState; 
   );
 }
 
+function InspectButton({ p, onPress, center }: { p: Palette; onPress: () => void; center?: boolean }) {
+  return (
+    <Pressable
+      accessibilityRole="button"
+      accessibilityLabel="Inspect an element"
+      onPress={onPress}
+      style={[styles.inspectCta, center ? styles.center : null, { borderColor: p.accent, backgroundColor: p.accentFill }]}
+    >
+      <Mark size={16} color={p.accent} />
+      <Text style={[styles.inspectCtaText, { color: p.accent }]}>Inspect an element</Text>
+    </Pressable>
+  );
+}
+
 function MenuItem({ label, hint, onPress, p }: { label: string; hint?: string; onPress: () => void; p: Palette }) {
   return (
     <Pressable accessibilityRole="menuitem" onPress={onPress} style={({ pressed }) => [styles.menuItem, pressed ? { backgroundColor: p.surface } : null]}>
@@ -400,7 +417,7 @@ function MenuItem({ label, hint, onPress, p }: { label: string; hint?: string; o
   );
 }
 
-function HeaderButton({ glyph, label, onPress, p, active }: { glyph: string; label: string; onPress: () => void; p: Palette; active?: boolean }) {
+function HeaderButton({ glyph, label, onPress, p, active }: { glyph: string | 'mark'; label: string; onPress: () => void; p: Palette; active?: boolean }) {
   return (
     <Pressable
       accessibilityRole="button"
@@ -410,7 +427,7 @@ function HeaderButton({ glyph, label, onPress, p, active }: { glyph: string; lab
       onPress={onPress}
       style={[styles.headerBtn, active ? { backgroundColor: p.accentFill } : null]}
     >
-      <Text style={[styles.headerGlyph, { color: active ? p.accent : p.muted }]}>{glyph}</Text>
+      {glyph === 'mark' ? <Mark size={18} color={active ? p.accent : p.muted} /> : <Text style={[styles.headerGlyph, { color: active ? p.accent : p.muted }]}>{glyph}</Text>}
     </Pressable>
   );
 }
@@ -464,7 +481,7 @@ const styles = StyleSheet.create({
   thinking: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   empty: { gap: 12, paddingVertical: 8 },
   emptyTitle: { fontSize: 15, fontWeight: '600' },
-  inspectCta: { alignSelf: 'flex-start', borderWidth: 1, borderRadius: 14, paddingHorizontal: 12, paddingVertical: 8 },
+  inspectCta: { flexDirection: 'row', alignItems: 'center', gap: 8, alignSelf: 'flex-start', borderWidth: 1, borderRadius: 14, paddingHorizontal: 12, paddingVertical: 8 },
   inspectCtaText: { fontSize: 14, fontWeight: '700' },
   chips: { gap: 8 },
   chip: { borderWidth: StyleSheet.hairlineWidth, borderRadius: 14, paddingHorizontal: 12, paddingVertical: 8, alignSelf: 'flex-start' },
@@ -505,6 +522,9 @@ const styles = StyleSheet.create({
   compactText: { flex: 1, fontSize: 13.5 },
   stopSmall: { width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center' },
   centered: { flexGrow: 1, justifyContent: 'center' },
+  setupWrap: { alignItems: 'center', gap: 12 },
+  divider: { alignSelf: 'stretch', height: StyleSheet.hairlineWidth, marginVertical: 6 },
+  center: { alignSelf: 'center' },
   pairingHead: { flexDirection: 'row', alignItems: 'center', gap: 10 },
   pairingText: { flex: 1, textAlign: 'left' },
   setup: { alignItems: 'center', gap: 10 },
