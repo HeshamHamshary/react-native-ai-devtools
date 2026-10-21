@@ -147,3 +147,55 @@ vite.config.ts.timestamp-*
 
 # Turbo Repo
 .turbo
+
+# ---- React Native monorepo ----
+.DS_Store
+.expo/
+.vscode/
+jsconfig.json
+
+# Xcode
+build/
+*.pbxuser
+!default.pbxuser
+xcuserdata
+DerivedData
+*.hmap
+*.ipa
+*.xcuserstate
+project.xcworkspace
+**/.xcode.env.local
+apps/example/ios/Pods
+apps/example/vendor/
+
+# Android/IJ
+.classpath
+.cxx
+.gradle
+.idea
+.project
+.settings
+local.properties
+android.iml
+android/app/libs
+android/keystores/debug.keystore
+
+# Yarn (berry)
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/sdks
+!.yarn/versions
+
+# Build output
+lib/
+.turbo/
+packages/*/lib/
+
+# React Native Codegen
+packages/*/ios/generated
+packages/*/android/generated
+
+# Local agent-devtools state (pairing tokens, logs)
+.rnad/

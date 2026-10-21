@@ -1,0 +1,373 @@
+#!/usr/bin/env node
+import { spawn } from 'node:child_process';
+import { existsSync, statSync } from 'node:fs';
+import { networkInterfaces } from 'node:os';
+import { resolve } from 'node:path';
+import { parseArgs } from 'node:util';
+
+import { claudeBinary } from './agent/account.ts';
+import { AUTH_MODES, agentEnv, stateDir } from './agent/credentials.ts';
+import { runChannelBridge } from './channel/bridge.ts';
+import { launchClaudeCode } from './channel/launch.ts';
+import { writeFileSync } from 'node:fs';
+import { toMaestro } from './flows/maestro.ts';
+import { FlowStore } from './flows/store.ts';
+import { readServerToken, rotateServerToken } from './security/serverToken.ts';
+import { SERVER_VERSION, startServer } from './server.ts';
+
+const c = {
+  dim: (s: string) => `\x1b[2m${s}\x1b[0m`,
+  bold: (s: string) => `\x1b[1m${s}\x1b[0m`,
+  green: (s: string) => `\x1b[32m${s}\x1b[0m`,
+  yellow: (s: string) => `\x1b[33m${s}\x1b[0m`,
+  red: (s: string) => `\x1b[31m${s}\x1b[0m`,
+  orange: (s: string) => `\x1b[38;5;173m${s}\x1b[0m`,
+};
+
+const HELP = `react-native-agent-devtools-server ${SERVER_VERSION}
+
+Usage:
+  react-native-agent-devtools-server [start] [options]   Run the bridge (default)
+  react-native-agent-devtools-server claude [--cwd DIR] [-- <claude args>]
+                                                         Start your own Claude Code with the app chat connected
+                                                         (channels, research preview; uses your Claude Code login)
+  react-native-agent-devtools-server mcp                 Stdio MCP server with the mobile tools, for
+                                                         claude mcp add rn-agent -- npx react-native-agent-devtools-server mcp
+  react-native-agent-devtools-server call <method> [json-params] [--device ios|android|<id>]
+                                                         Invoke a device RPC on the connected app
+  react-native-agent-devtools-server tool <name> [json-args] [--device ios|android|<id>]
+                                                         Run one of the agent's mobile_* tools (no model)
+  react-native-agent-devtools-server bench [--iterations N]
+                                                         Measure device-side latency (no model)
+  react-native-agent-devtools-server devices             List connected apps
+  react-native-agent-devtools-server flows [list | show <name> | run <name> | export <name> --maestro [--out f]]
+                                                         Saved test flows: replay, or export to Maestro YAML
+  react-native-agent-devtools-server pair                Show the current pairing code
+  react-native-agent-devtools-server unpair              Revoke every paired device
+  react-native-agent-devtools-server login | logout      Sign the in-app agent in/out (Anthropic Console)
+  react-native-agent-devtools-server token [--rotate]    Print (or replace) the local API token
+  react-native-agent-devtools-server channel             The channel bridge Claude Code starts (not run by hand)
+
+Options:
+  --port <n>               Port (default 8765)
+  --auth <mode>            Credentials for the in-app agent: ${AUTH_MODES.join(' | ')}
+                           (default: the Console sign-in from "Set up Claude", if completed)
+  --lan                    Listen on all interfaces for physical devices (pairing required)
+  --require-pairing        Require pairing for every device, including simulators
+  --os-input               Use OS-level input (adb, or Maestro on the iOS simulator) for taps,
+                           typing and swipes; fail instead of falling back
+  --repo <path>            Let the agent read this source tree (secrets excluded). Repeatable.
+  --allow-edits            Allow Edit/Write inside --repo roots, each approved on a paired device
+  --project-instructions   Add the repo's CLAUDE.md to the agent's instructions (text only)
+  --model <id>             Model for the in-app agent (default: SDK default)
+  --no-agent               Disable the in-app chat agent (MCP and RPC still work)
+  --no-mcp                 Disable the /mcp endpoint
+  --demo-agent             Scripted replies (labelled, no model) for UI development
+  -h, --help
+
+Credentials are never picked up implicitly. An ANTHROPIC_API_KEY in this shell is used only
+with --auth api-key; a personal claude.ai login is never used by the in-app agent.
+
+Or use your own Claude Code login, with no new API key:
+  react-native-agent-devtools-server claude              chat from the app, answered by your Claude Code session
+  claude mcp add rn-agent -- npx react-native-agent-devtools-server mcp
+                                                         drive the app from Claude Code in the terminal
+`;
+
+function lanAddresses(): string[] {
+  return Object.values(networkInterfaces())
+    .flat()
+    .filter((i): i is NonNullable<typeof i> => !!i && i.family === 'IPv4' && !i.internal)
+    .map((i) => i.address);
+}
+
+let deviceSelector: string | undefined;
+
+/** Authenticated request to the running server's local API. */
+async function api(port: number, path: string, init: { method?: string; body?: unknown } = {}): Promise<unknown> {
+  const token = readServerToken(stateDir());
+  if (!token) throw new Error('no server token yet: start the server first (react-native-agent-devtools-server)');
+  const res = await fetch(`http://127.0.0.1:${port}${path}`, {
+    method: init.method ?? 'GET',
+    headers: { authorization: `Bearer ${token}`, ...(init.body !== undefined ? { 'content-type': 'application/json' } : {}) },
+    ...(init.body !== undefined ? { body: JSON.stringify(init.body) } : {}),
+  }).catch(() => {
+    throw new Error(`the devtools server is not running on port ${port}`);
+  });
+  if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
+  return res.json();
+}
+
+const rpc = (port: number, method: string, params: unknown) =>
+  api(port, '/api/rpc', { method: 'POST', body: { method, params, timeoutMs: 90_000, ...(deviceSelector ? { device: deviceSelector } : {}) } }) as Promise<{
+    ok: boolean;
+    result?: unknown;
+    deviceMs?: number;
+    rttMs?: number;
+    error?: { code: string; message: string };
+  }>;
+
+async function main() {
+  const argv = process.argv.slice(2);
+  const command = argv[0] && !argv[0].startsWith('-') ? argv.shift()! : 'start';
+  const { values, positionals } = parseArgs({
+    args: argv,
+    allowPositionals: true,
+    options: {
+      port: { type: 'string', default: '8765' },
+      lan: { type: 'boolean', default: false },
+      repo: { type: 'string', multiple: true },
+      'allow-edits': { type: 'boolean', default: false },
+      model: { type: 'string' },
+      'no-agent': { type: 'boolean', default: false },
+      'no-mcp': { type: 'boolean', default: false },
+      'project-instructions': { type: 'boolean', default: false },
+      auth: { type: 'string' },
+      'require-pairing': { type: 'boolean', default: false },
+      'os-input': { type: 'boolean', default: false },
+      maestro: { type: 'boolean', default: false },
+      out: { type: 'string' },
+      rotate: { type: 'boolean', default: false },
+      'demo-agent': { type: 'boolean', default: false },
+      iterations: { type: 'string', default: '20' },
+      device: { type: 'string' },
+      cwd: { type: 'string' },
+      help: { type: 'boolean', short: 'h', default: false },
+    },
+  });
+  if (values.help) {
+    process.stdout.write(HELP);
+    return;
+  }
+  const port = Number(values.port);
+  deviceSelector = values.device;
+
+  if (command === 'call') {
+    const [method, raw] = positionals;
+    if (!method) throw new Error('usage: call <method> [json-params]');
+    const r = await rpc(port, method, raw ? JSON.parse(raw) : {});
+    process.stdout.write(`${JSON.stringify(r, null, 2)}\n`);
+    process.exitCode = r.ok ? 0 : 1;
+    return;
+  }
+
+  if (command === 'tool') {
+    const [name, raw] = positionals;
+    if (!name) throw new Error('usage: tool <mobile_tool_name> [json-args] [--device ios|android|<id>]');
+    const out = (await api(port, '/api/tool', { method: 'POST', body: { name, args: raw ? JSON.parse(raw) : {}, ...(deviceSelector ? { device: deviceSelector } : {}) } })) as {
+      content: { type: string; text?: string }[];
+      isError?: boolean;
+    };
+    for (const c of out.content) process.stdout.write(c.type === 'text' ? `${c.text}\n` : `[${c.type}]\n`);
+    process.exitCode = out.isError ? 1 : 0;
+    return;
+  }
+
+  if (command === 'flows') {
+    const [sub = 'list', name] = positionals;
+    const store = new FlowStore(stateDir());
+    if (sub === 'list') {
+      const list = store.list();
+      process.stdout.write(list.length ? `${list.map((f) => `${f.app}/${f.name}  ${f.steps} steps  ${f.createdAt.slice(0, 16)}`).join('\n')}\n` : 'no saved flows\n');
+      return;
+    }
+    if (!name) throw new Error('usage: flows list | show <name> | run <name> [--device] | export <name> --maestro [--out file]');
+    if (sub === 'run') {
+      // Secret placeholders are filled from this shell's RNAD_SECRET_* variables.
+      const secrets = Object.fromEntries(Object.entries(process.env).filter((e): e is [string, string] => e[0].startsWith('RNAD_SECRET_') && typeof e[1] === 'string'));
+      const out = (await api(port, '/api/tool', { method: 'POST', body: { name: 'mobile_run_flow', args: { name, secrets }, ...(deviceSelector ? { device: deviceSelector } : {}) } })) as {
+        content: { text?: string }[];
+        isError?: boolean;
+      };
+      process.stdout.write(`${out.content.map((c) => c.text ?? '').join('\n')}\n`);
+      process.exitCode = out.isError ? 1 : 0;
+      return;
+    }
+    const found = store.load(name);
+    if (!found) throw new Error(`no flow named ${name} (see: flows list)`);
+    if (sub === 'show') {
+      process.stdout.write(`${found.file}\n${JSON.stringify(found.flow, null, 2)}\n`);
+      return;
+    }
+    if (sub === 'export') {
+      if (!values.maestro) throw new Error('export needs --maestro');
+      const yaml = toMaestro(found.flow);
+      if (values.out) {
+        writeFileSync(resolve(process.env.INIT_CWD ?? process.cwd(), values.out), yaml);
+        process.stdout.write(`wrote ${values.out}\n`);
+      } else process.stdout.write(yaml);
+      return;
+    }
+    throw new Error(`unknown flows command ${sub}`);
+  }
+
+  if (command === 'devices') {
+    process.stdout.write(`${JSON.stringify(await api(port, '/api/devices'), null, 2)}\n`);
+    return;
+  }
+
+  if (command === 'pair') {
+    const p = (await api(port, '/api/pairing')) as { code: string; expiresAt: number; paired: { label?: string; created: number }[] };
+    process.stdout.write(
+      `pairing code ${c.orange(p.code)} ${c.dim(`(single use, expires ${new Date(p.expiresAt).toLocaleTimeString()})`)}\n` +
+        `paired devices: ${p.paired.length ? p.paired.map((d) => `${d.label ?? 'device'} (${new Date(d.created).toLocaleDateString()})`).join(', ') : 'none'}\n`,
+    );
+    return;
+  }
+
+  if (command === 'unpair') {
+    await api(port, '/api/pairing/revoke', { method: 'POST' });
+    process.stdout.write('all paired devices were revoked; they must pair again\n');
+    return;
+  }
+
+  if (command === 'token') {
+    if (values.rotate) {
+      rotateServerToken(stateDir());
+      process.stdout.write('token removed: restart the server to create a new one, then restart Claude Code\n');
+      return;
+    }
+    const token = readServerToken(stateDir());
+    if (!token) throw new Error('no server token yet: start the server first');
+    process.stdout.write(`${token}\n`);
+    return;
+  }
+
+  if (command === 'login' || command === 'logout') {
+    const bin = claudeBinary();
+    if (!bin) throw new Error('the Claude Code binary bundled with the Agent SDK is missing; reinstall dependencies');
+    // Interactive, so the paste-a-code fallback works on machines without a local browser.
+    const args = command === 'login' ? ['auth', 'login', '--console'] : ['auth', 'logout'];
+    const child = spawn(bin, args, { env: agentEnv('console'), stdio: 'inherit' });
+    process.exitCode = await new Promise<number>((r) => child.on('close', (code) => r(code ?? 1)));
+    return;
+  }
+
+  if (command === 'channel' || command === 'mcp') {
+    // Claude Code talks MCP over this process's stdio: nothing else may write to stdout.
+    const log = (line: string) => process.stderr.write(`[rn-agent ${command}] ${line}\n`);
+    process.stdin.on('end', () => process.exit(0));
+    await runChannelBridge({ port, version: SERVER_VERSION, log, token: readServerToken(stateDir()), channel: command === 'channel' });
+    return;
+  }
+
+  if (command === 'claude') {
+    const base = process.env.INIT_CWD ?? process.cwd();
+    const bridgeCommand = [
+      process.execPath,
+      ...process.execArgv.filter((a) => a.startsWith('--conditions')),
+      process.argv[1]!,
+      'channel',
+      '--port',
+      String(port),
+    ];
+    process.exitCode = await launchClaudeCode({
+      port,
+      token: readServerToken(stateDir()),
+      cwd: values.cwd ? resolve(base, values.cwd) : base,
+      bridgeCommand,
+      claudeArgs: positionals,
+      log: (line) => process.stdout.write(`${c.orange('✦')} ${line}\n`),
+    });
+    return;
+  }
+
+  if (command === 'bench') {
+    const n = Number(values.iterations);
+    const ops: [string, string, unknown][] = [
+      ['getScreen', 'getScreen', {}],
+      ['getUI', 'getUI', {}],
+      ['screenshot', 'screenshot', { maxWidth: 720 }],
+      ['getLogs', 'getLogs', { limit: 20 }],
+    ];
+    const pct = (a: number[], p: number) => [...a].sort((x, y) => x - y)[Math.min(a.length - 1, Math.floor((p / 100) * a.length))] ?? 0;
+    process.stdout.write(`benchmarking ${n} iterations per op against the active device…\n`);
+    const rows: string[] = [];
+    for (const [label, method, params] of ops) {
+      const dev: number[] = [];
+      const rtt: number[] = [];
+      const wall: number[] = [];
+      let size = 0;
+      for (let i = 0; i < n; i++) {
+        const t0 = performance.now();
+        const r = await rpc(port, method, params);
+        wall.push(performance.now() - t0);
+        if (!r.ok) throw new Error(`${method}: ${r.error?.message}`);
+        dev.push(r.deviceMs ?? 0);
+        rtt.push(r.rttMs ?? 0);
+        size = JSON.stringify(r.result).length;
+      }
+      rows.push(
+        `${label.padEnd(11)} device p50 ${String(Math.round(pct(dev, 50))).padStart(4)}ms p95 ${String(Math.round(pct(dev, 95))).padStart(4)}ms · ws round trip p50 ${String(Math.round(pct(rtt, 50))).padStart(4)}ms p95 ${String(Math.round(pct(rtt, 95))).padStart(4)}ms · payload ${(size / 1024).toFixed(1)}KB`,
+      );
+    }
+    process.stdout.write(`${rows.join('\n')}\n`);
+    return;
+  }
+
+  if (command !== 'start') throw new Error(`unknown command ${command}\n\n${HELP}`);
+
+  const repoRoots = (values.repo ?? []).map((r) => resolve(r));
+  for (const r of repoRoots) {
+    if (!existsSync(r) || !statSync(r).isDirectory()) throw new Error(`--repo ${r} is not a directory`);
+  }
+  const log = (line: string) => process.stdout.write(`${c.dim(new Date().toISOString().slice(11, 19))} ${line}\n`);
+  const server = await startServer({
+    port,
+    lan: values.lan === true,
+    repoRoots,
+    allowEdits: values['allow-edits'] === true,
+    ...(values.model ? { model: values.model } : {}),
+    agent: !values['no-agent'],
+    ...((values.auth ?? process.env.RNAD_AUTH) ? { auth: values.auth ?? process.env.RNAD_AUTH } : {}),
+    mcp: !values['no-mcp'],
+    projectInstructions: values['project-instructions'] === true,
+    requirePairing: values['require-pairing'] === true,
+    osInput: values['os-input'] === true,
+    demoAgent: values['demo-agent'] === true,
+    log,
+  });
+
+  const avail = server.agent();
+  const agentLine = avail.available
+    ? c.green('ready') + c.dim(` (credentials: ${avail.source}${values.model ? `, model ${values.model}` : ''})`)
+    : avail.reason?.startsWith('Not signed in')
+      ? c.yellow('not signed in: tap "Set up Claude" in the app') + c.dim(' (or start with --auth)')
+      : c.yellow(`unavailable: ${avail.reason}`);
+  const out: string[] = [
+    '',
+    `${c.orange('✦')} ${c.bold('react-native-agent-devtools-server')} ${c.dim(`v${SERVER_VERSION}`)}`,
+    '',
+    `  ${c.bold('listening')}    ws://${values.lan ? '0.0.0.0' : '127.0.0.1'}:${server.port} ${c.dim(values.lan ? '(all interfaces)' : '(loopback only)')}`,
+    `  ${c.bold('simulators')}   iOS simulator and Android emulator connect automatically via the Metro host${values['require-pairing'] ? c.dim(' (pairing required)') : ''}`,
+    `               ${c.dim(`USB Android: adb reverse tcp:${server.port} tcp:${server.port}`)}`,
+    `  ${c.bold('pairing code')} ${c.orange(server.pairing.currentCode)} ${c.dim('pair an app to approve edits and Claude Code permissions from it')}`,
+    `  ${c.bold('agent')}        ${agentLine}`,
+    ...server.authNotices.map((n) => `               ${c.dim(n)}`),
+    `  ${c.bold('repo access')}  ${repoRoots.length ? `read${values['allow-edits'] ? ' + approved edits' : '-only'}: ${repoRoots.join(', ')} ${c.dim('(secret files always excluded)')}` : c.dim('disabled (use --repo <path>)')}`,
+    `  ${c.bold('Claude Code')}  chat from the app with your own Claude Code: react-native-agent-devtools-server claude ${c.dim('(channels preview)')}`,
+    `               ${c.dim('terminal only:')} claude mcp add rn-agent -- npx react-native-agent-devtools-server mcp`,
+  ];
+  if (values.lan) {
+    out.push(
+      '',
+      c.yellow('  ⚠ LAN mode: the server is reachable from your network. Devices must pair; control APIs stay loopback-only.'),
+      `  ${c.bold('device URL')}   ${lanAddresses().map((a) => `ws://${a}:${server.port}`).join('  ') || '(no LAN address found)'}`,
+    );
+  }
+  out.push('');
+  process.stdout.write(out.join('\n') + '\n');
+
+  const shutdown = async () => {
+    log('shutting down');
+    await server.close();
+    process.exit(0);
+  };
+  process.on('SIGINT', shutdown);
+  process.on('SIGTERM', shutdown);
+}
+
+main().catch((e) => {
+  process.stderr.write(`${c.red('error')} ${e instanceof Error ? e.message : String(e)}\n`);
+  process.exit(1);
+});

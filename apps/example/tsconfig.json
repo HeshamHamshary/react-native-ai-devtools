@@ -1,0 +1,10 @@
+{
+  "extends": "../../packages/react-native-agent-devtools/tsconfig.json",
+  "compilerOptions": {
+    "rootDir": "../..",
+    "paths": {
+      "react-native-agent-devtools": ["../../packages/react-native-agent-devtools/src/index"]
+    }
+  },
+  "include": ["src", "index.js"]
+}
