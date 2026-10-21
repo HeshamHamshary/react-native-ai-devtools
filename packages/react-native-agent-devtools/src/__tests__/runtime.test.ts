@@ -82,3 +82,17 @@ describe('resuming after a reload', () => {
     expect(rt.store.get().chat).toBe('idle');
   });
 });
+
+describe('connection help', () => {
+  it('explains how to reach the server from a physical device after repeated failures', () => {
+    const rt = new Runtime({ serverUrl: 'ws://192.168.1.20:8765' });
+    const conn = rt as unknown as { onConnState(s: string, d?: string): void };
+    conn.onConnState('closed', 'code 1006');
+    expect(rt.store.get().connectionHint).toBeUndefined();
+    conn.onConnState('closed');
+    conn.onConnState('closed');
+    expect(rt.store.get().connectionHint).toMatch(/--lan and pair this app/);
+    conn.onConnState('open');
+    expect(rt.store.get().connectionHint).toBeUndefined();
+  });
+});

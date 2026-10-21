@@ -80,6 +80,8 @@ export interface UIState {
   trusted?: boolean;
   /** The developer chose to pair this app (as opposed to the server requiring it). */
   pairingRequested?: boolean;
+  /** What to do when the server can't be reached (shown while disconnected). */
+  connectionHint?: string;
   serverUrl: string;
   chat: ChatState;
   turnId?: string;
@@ -335,7 +337,30 @@ export class Runtime {
     this.conn?.reconnect();
   }
 
+  private failedAttempts = 0;
+  private everConnected = false;
+
+  private connectionHint(): string | undefined {
+    if (this.everConnected || this.failedAttempts < 3) return undefined;
+    const url = this.store.get().serverUrl;
+    const host = /^wss?:\/\/([^/:]+)/.exec(url)?.[1] ?? '';
+    if (/^(localhost|127\.0\.0\.1|10\.0\.2\.2|10\.0\.3\.2)$/.test(host)) {
+      return `Can't reach the devtools server at ${url}. Start it on your computer: npx react-native-agent-devtools-server`;
+    }
+    return `Can't reach the devtools server at ${url}. On a physical device, start the server with --lan and pair this app, or connect over USB with \`adb reverse tcp:8765 tcp:8765\` (Android).`;
+  }
+
   private onConnState(s: ConnectionState, detail?: string): void {
+    if (s === 'open') {
+      this.everConnected = true;
+      this.failedAttempts = 0;
+      if (this.store.get().connectionHint) this.store.set({ connectionHint: undefined });
+    }
+    if (s === 'closed') {
+      this.failedAttempts++;
+      const hint = this.connectionHint();
+      if (hint !== this.store.get().connectionHint) this.store.set({ connectionHint: hint });
+    }
     if (s === 'connecting') {
       if (this.store.get().connection !== 'pairing-required') this.store.set({ connection: 'connecting', connectionDetail: detail });
     } else if (s === 'closed') {

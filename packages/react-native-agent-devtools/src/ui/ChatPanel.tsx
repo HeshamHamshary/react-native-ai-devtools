@@ -187,6 +187,13 @@ export function ChatPanel({ runtime, palette: p, insets, collapsed, attach, onAt
           if (state.messages.length) scrollRef.current?.scrollToEnd({ animated: true });
         }}
       >
+        {state.connection !== 'connected' && state.connectionHint ? (
+          <View style={[styles.hint, { borderColor: p.warn, backgroundColor: p.surface }]}>
+            <Text selectable style={[styles.note, styles.hintText, { color: p.text }]}>
+              {state.connectionHint}
+            </Text>
+          </View>
+        ) : null}
         {needsSetup ? (
           <View style={styles.setupWrap}>
             <SetUp p={p} setup={state.setup} canSetup={state.server?.agent.setup === true} reason={state.server?.agent.reason} onSetup={() => runtime.openSetup()} />
@@ -523,6 +530,8 @@ const styles = StyleSheet.create({
   stopSmall: { width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center' },
   centered: { flexGrow: 1, justifyContent: 'center' },
   setupWrap: { alignItems: 'center', gap: 12 },
+  hint: { borderWidth: StyleSheet.hairlineWidth, borderRadius: radius.sm, padding: 10 },
+  hintText: { textAlign: 'left' },
   divider: { alignSelf: 'stretch', height: StyleSheet.hairlineWidth, marginVertical: 6 },
   center: { alignSelf: 'center' },
   pairingHead: { flexDirection: 'row', alignItems: 'center', gap: 10 },
