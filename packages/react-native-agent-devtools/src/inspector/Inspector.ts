@@ -647,7 +647,7 @@ export class Inspector {
     }
     const transitioning = !!this.deps.probe && !opts.skipProbe && [...pushedPerStack.values()].some((n) => n > 1);
 
-    let canGoBack = false;
+    let canGoBack: boolean;
     try {
       canGoBack = !!route?.navigation?.canGoBack?.();
     } catch {

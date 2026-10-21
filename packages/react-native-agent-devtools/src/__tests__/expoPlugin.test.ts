@@ -14,7 +14,6 @@ jest.mock(
   { virtual: true },
 );
 
-// eslint-disable-next-line @typescript-eslint/no-require-imports
 const plugin = require('../../app.plugin.js') as (config: unknown, props?: unknown) => { modResults: Record<string, unknown> };
 
 function project(deps: Record<string, string>) {

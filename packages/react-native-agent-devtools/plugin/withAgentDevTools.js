@@ -35,7 +35,7 @@ function warnWithoutDevClient(config) {
         '[react-native-agent-devtools] expo-dev-client is not installed. Expo Go cannot load this library\'s native module; build a development build (npx expo run:ios / run:android).',
       );
     }
-  } catch (e) {
+  } catch {
     // no package.json to inspect
   }
 }
@@ -44,7 +44,7 @@ const pkg = require('../package.json');
 let plugin = withAgentDevTools;
 try {
   plugin = require('@expo/config-plugins').createRunOncePlugin(withAgentDevTools, pkg.name, pkg.version);
-} catch (e) {
+} catch {
   // @expo/config-plugins is only present in Expo projects; the plain function still works.
 }
 module.exports = plugin;

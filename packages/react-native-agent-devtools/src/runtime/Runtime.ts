@@ -887,7 +887,7 @@ export class Runtime {
       return sel ? { details: sel.details, text: sel.text } : { text: 'The developer has not picked an element (inspect mode is in the chat panel).' };
     },
     getNavigation: async () => {
-      let overlays: unknown[] = [];
+      let overlays: unknown[];
       try {
         overlays = nativeAvailable ? await native.getNativeOverlays() : [];
       } catch {

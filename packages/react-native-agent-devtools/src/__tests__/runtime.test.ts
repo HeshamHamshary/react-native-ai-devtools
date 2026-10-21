@@ -17,7 +17,6 @@ jest.mock('../native', () => {
   };
 });
 
-// eslint-disable-next-line import/first
 import { Runtime } from '../runtime/Runtime';
 
 const serverInfo = { version: '1', agent: { available: false }, repoAccess: 'none', network: 'loopback' } as const;

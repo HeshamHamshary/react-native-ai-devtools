@@ -412,7 +412,7 @@ export class Executor {
     return this.act(long ? 'longPress' : 'tap', signal, async (snap0) => {
       const warnings: string[] = [];
       let snap = snap0;
-      let m = this.resolve(snap, target);
+      const m = this.resolve(snap, target);
       let el = m.element;
       if (!el.visible && el.scrollContainer) {
         const r = await this.scrollIntoView(el, signal);
@@ -551,7 +551,7 @@ export class Executor {
     const replace = opts.replace !== false;
     return this.act(text === '' && replace ? 'clearText' : 'typeText', signal, async (snap0) => {
       const warnings: string[] = [];
-      let m = this.resolve(snap0, target);
+      const m = this.resolve(snap0, target);
       let el = m.element;
       if (el.role !== 'textbox') {
         throw new ToolFailure('INVALID', `${el.ref} is a ${el.role}, not a text field.`, { target: this.targetInfo(el) });

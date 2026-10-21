@@ -14,9 +14,17 @@
     "typecheck": "yarn workspaces foreach -A --exclude react-native-agent-devtools-monorepo run typecheck",
     "test": "yarn workspaces foreach -A --exclude react-native-agent-devtools-monorepo run test",
     "build": "yarn workspaces foreach -A -t --exclude react-native-agent-devtools-monorepo --exclude react-native-agent-devtools-example run build",
-    "check:release-bundle": "node scripts/check-release-bundle.mjs"
+    "check:release-bundle": "node scripts/check-release-bundle.mjs",
+    "lint": "eslint ."
   },
   "engines": {
     "node": ">= 22.18.0"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "eslint": "^10.13.0",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.72.0"
   }
 }

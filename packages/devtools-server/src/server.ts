@@ -196,7 +196,6 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
     if (conv) conv.session = s;
   };
   const mcp = opts.mcp ? createMcpHandler(devices, SERVER_VERSION, toolEnv) : undefined;
-  let port = opts.port;
 
   const serverInfo = (session?: ChatSession, device?: DeviceSession): ServerInfo => {
     const model = availability.via ? undefined : (session?.modelName ?? (device ? modelFor.get(device.id) : undefined) ?? opts.model);
@@ -540,7 +539,7 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
     http.listen(opts.port, opts.lan ? '0.0.0.0' : '127.0.0.1', () => resolve());
   });
   const address = http.address();
-  port = typeof address === 'object' && address ? address.port : opts.port;
+  const port = typeof address === 'object' && address ? address.port : opts.port;
 
   return {
     port,

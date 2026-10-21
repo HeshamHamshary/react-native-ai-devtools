@@ -1,0 +1,86 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  YARN: node .yarn/releases/yarn-4.11.0.cjs
+
+jobs:
+  checks:
+    name: Lint, typecheck, tests, build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+      - name: Install
+        run: $YARN install --immutable
+      - name: Lint
+        run: $YARN lint
+      - name: Typecheck
+        run: $YARN typecheck
+      - name: Unit and integration tests (no model calls, no network services)
+        run: $YARN test
+      - name: Build packages
+        run: $YARN build
+      - name: Release bundles contain none of the devtools runtime
+        run: $YARN check:release-bundle
+
+  android:
+    name: Android debug build
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    needs: checks
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Install
+        run: $YARN install --immutable
+      - name: Assemble the example app (debug, arm64 and x86_64)
+        working-directory: apps/example/android
+        run: ./gradlew :app:assembleDebug -PreactNativeArchitectures=arm64-v8a,x86_64 --console=plain
+
+  ios:
+    name: iOS simulator build
+    runs-on: macos-15
+    timeout-minutes: 60
+    needs: checks
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+      - name: Install
+        run: $YARN install --immutable
+      - name: Pods
+        working-directory: apps/example/ios
+        run: |
+          bundle install
+          bundle exec pod install
+      - name: Build the example app for the simulator
+        working-directory: apps/example/ios
+        run: |
+          set -o pipefail
+          xcodebuild -workspace AiDevtoolsExample.xcworkspace -scheme AiDevtoolsExample -configuration Debug \
+            -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' -derivedDataPath build/dd build \
+            CODE_SIGNING_ALLOWED=NO | tail -50

@@ -45,7 +45,7 @@ export class FlowStore {
   list(bundleId?: string): { name: string; app: string; steps: number; createdAt: string }[] {
     const out: { name: string; app: string; steps: number; createdAt: string }[] = [];
     for (const app of bundleId ? [flowName(bundleId)] : this.apps()) {
-      let files: string[] = [];
+      let files: string[];
       try {
         files = readdirSync(join(this.dir, app)).filter((f) => f.endsWith('.json'));
       } catch {
