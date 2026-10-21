@@ -12,7 +12,7 @@ App (debug build)                                         Developer machine
 │   ├─ Executor   (actions, settle, guards)     │          │   │    mobile_* tools (in-process MCP)        │
 │   ├─ LogCollector / NetworkCollector / Nav    │          │   │    Read/Grep/Glob (PreToolUse allowlist)  │
 │   ├─ Connection (reconnect, hello, rpc)       │          │   ├─ /mcp  (Claude Code, stateless HTTP)       │
-│   └─ native (TurboModule)                     │          │   ├─ /setup (local API-key page)               │
+│   └─ native (TurboModule)                     │          │   ├─ sign-in (claude auth login --console)     │
 │        iOS: Swift (UIKit) + ObjC++ shim       │          │   └─ /api/rpc, /api/devices (CLI/bench)        │
 │        Android: Kotlin                        │          └──────────────────────────────────────────────┘
 └──────────────────────────────────────────────┘
@@ -89,8 +89,9 @@ App (debug build)                                         Developer machine
   - Partial messages stream to the device as `chat.delta`. Tool calls become `chat.tool` start/end rows; control tools flip the UI into the "agent is controlling the app" state.
   - `chat.done` carries timing: total, first token, tool, device and model time, plus the cost estimate.
 - **Credentials:**
-  - Sources: `ANTHROPIC_API_KEY`, a key saved through `/setup`, or Bedrock/Vertex/Foundry.
-  - The subprocess gets an isolated `CLAUDE_CONFIG_DIR`. Before the first prompt, `accountInfo()` must report an API-key or cloud source; otherwise the session fails closed.
+  - Sources: the Anthropic Console sign-in started by "Set up Claude" (Claude Code's `auth login --console`, run by the server), `ANTHROPIC_API_KEY`, or Bedrock/Vertex/Foundry.
+  - Every Claude Code process the server starts uses a dedicated `CLAUDE_CONFIG_DIR` (`~/.config/react-native-agent-devtools/claude`). Before the first prompt, `accountInfo()` must report an API-key or cloud source and no subscription; otherwise the session fails closed.
+  - Sign-in progress reaches the device as `setup.status` (`waiting` / `failed`); success arrives as a fresh `welcome` with the agent available.
 - **Claude Code:** `/mcp` exposes the same tool definitions over stateless Streamable HTTP and acts on the most recently connected device.
 - **Repository access:** the built-in tools are limited to `Read`/`Grep`/`Glob` (plus `Edit`/`Write` with `--allow-edits`). A PreToolUse hook enforces the root allowlist and the secret-file denylist, and resolves symlinks. Bash and web tools are disallowed.
 
@@ -99,7 +100,7 @@ App (debug build)                                         Developer machine
 | Direction | Messages |
 |---|---|
 | device → server | `hello` (device info, capabilities, token or pairing code), `chat.send`, `chat.cancel`, `chat.reset`, `rpc.result`, `approval.response`, `setup.open`, `ping` |
-| server → device | `welcome`, `auth.required`, `chat.status`, `chat.delta`, `chat.text`, `chat.tool`, `chat.done`, `chat.error`, `rpc.call`, `rpc.cancel`, `approval.request`, `pong` |
+| server → device | `welcome`, `auth.required`, `chat.status`, `chat.delta`, `chat.text`, `chat.tool`, `chat.done`, `chat.error`, `rpc.call`, `rpc.cancel`, `approval.request`, `setup.status`, `pong` |
 
 Device RPCs: `getScreen`, `getUI`, `resolve`, `tap`, `longPress`, `typeText`, `clearText`, `scroll`, `scrollTo`, `swipe`, `waitFor`, `back`, `runSequence`, `screenshot`, `getLogs`, `getNetwork`, `getNavigation`, `getPerf`, `getCapabilities`.
 

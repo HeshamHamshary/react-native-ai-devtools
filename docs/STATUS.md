@@ -27,11 +27,11 @@ packages/react-native-agent-devtools/
   src/ui/                        launcher, chat panel, markdown, Claude mark (temporary)
   src/__tests__/                 27 tests
 packages/devtools-server/
-  src/agent/                     Agent SDK session, auth gate, prompt, demo agent
-  src/security/                  pairing, origin/host checks, repo allowlist, credential store
-  src/transport/                 device registry/RPC, MCP endpoint, setup page
+  src/agent/                     Agent SDK session, auth gate, Console sign-in, prompt, demo agent
+  src/security/                  pairing, origin/host checks, repo allowlist
+  src/transport/                 device registry/RPC, MCP endpoint
   src/tools/                     15 mobile_* tool definitions + formatting
-  src/*.test.ts                  18 tests
+  src/*.test.ts                  20 tests
 docs/                            review, architecture, setup, capability matrix, security, this file
 ```
 
@@ -45,7 +45,7 @@ node .yarn/releases/yarn-4.11.0.cjs example ios | android              # build +
 node .yarn/releases/yarn-4.11.0.cjs test && node .yarn/releases/yarn-4.11.0.cjs build
 ```
 
-**Connect Claude.** Tap "Set up Claude" in the app panel. The setup page opens on your computer: paste an Anthropic API key there. The alternative is to drive the app from your own Claude Code session:
+**Connect Claude.** Tap "Set up Claude" in the app panel and finish signing in with your Anthropic Console account in your computer's browser. The chat turns on by itself. The alternative is to drive the app from your own Claude Code session:
 
 ```bash
 claude mcp add --transport http rn-agent http://127.0.0.1:8765/mcp
@@ -55,8 +55,8 @@ claude mcp add --transport http rn-agent http://127.0.0.1:8765/mcp
 
 | Check | Result |
 |---|---|
-| `packages/protocol`: `node --test` | **12/12 passed** |
-| `packages/devtools-server`: `node --test` (pairing, origin/rebinding, repo allowlist, RPC, MCP, LAN pairing over a real interface, setup flow, auth gate) | **18/18 passed** |
+| `packages/protocol`: `node --test` | **13/13 passed** |
+| `packages/devtools-server`: `node --test` (pairing, origin/rebinding, repo allowlist, RPC, MCP, LAN pairing over a real interface, sign-in flow, auth gate, agent config isolation against the real Claude Code binary) | **20/20 passed** |
 | `packages/react-native-agent-devtools`: jest (discovery, refs, hit coverage, pruning, matching, executor modes and refusals, sequences, collectors) | **27/27 passed** |
 | `yarn typecheck` (all workspaces) | passed |
 | `yarn build`: Bob (RN lib), tsc (protocol, server); compiled CLI runs from `bin/` | passed |
@@ -96,17 +96,27 @@ claude mcp add --transport http rn-agent http://127.0.0.1:8765/mcp
   - `app_state` attached to each message
   - the credential gate
 - MCP endpoint for Claude Code (`tools/list` and `tools/call` verified against a device by test).
-- One-tap "Set up Claude" flow, verified on Android: launcher → button → server opened `http://127.0.0.1:8765/setup` on the Mac. Key storage, validation and the live re-enable are verified by test with stubbed validation.
+- One-tap "Set up Claude" sign-in, verified on the Android emulator with the browser launch stubbed:
+  - The button started Claude Code's `auth login --console`, which produced the Anthropic sign-in URL with a localhost callback.
+  - The app showed "Finish signing in on your computer".
+  - Tapping again restarted the sign-in, with one process at a time.
+  - A sign-in that didn't finish came back as a readable error.
+
+  iOS shows the same panel. The live re-enable after a successful sign-in is verified by test with a stubbed sign-in.
 - `<AgentTarget>` explicit instrumentation; gesture-handler button detection.
 
 ### Partial / not yet verified
 
-- **In-app chat with a real model.** The in-app UI was verified end to end with the clearly labelled `--demo-agent`, which runs real device tools. A real model turn was verified once through a fake-device harness (see the incident below), but not in the app panel. *Needs an API key via the setup page.*
+- **In-app chat with a real model.** The in-app UI was verified end to end with the clearly labelled `--demo-agent`, which runs real device tools. A real model turn was verified once through a fake-device harness (see the incident below), but not in the app panel. *Needs you to complete the sign-in once.*
 - **Screenshot → model visual analysis.** Images are produced and returned as MCP image content, which the SDK docs say reaches the model. No model has analyzed one yet.
 - **Physical devices** (iPhone over LAN, Android over USB or LAN): code paths exist; untested.
 - **Tapping the iOS chat panel:** the simulator can't be tapped from automation here, so the panel was verified visually (opened via `initiallyOpen`) and on Android via adb input.
 - **Native alerts:** detected read-only; their buttons can't be tapped yet.
-- **The credential gate under a real API key.** Unit-tested decision logic only. Whether the isolated `CLAUDE_CONFIG_DIR` alone keeps a stored Claude Code login from taking precedence over the key is unverified. If it doesn't, the gate refuses and says so.
+- **A completed sign-in.**
+  - Not run here, because it needs your Anthropic account.
+  - The gate expects `accountInfo().apiKeySource === '/login managed key'`. That label comes from Claude Code 2.1.306's own description of its credential sources: "an API key created and stored by /login with an Anthropic Console account".
+  - That the CLI exits 0 on success is assumed.
+  - Isolation is verified: a fresh agent config directory reports signed out while the developer is logged in to Claude Code.
 
 ### Not supported (by design or not yet built)
 
@@ -201,7 +211,7 @@ One turn, not a benchmark. It ran unintentionally on the owner's login; see the 
 
 ## Next priorities
 
-1. Run the in-app chat with a real API key (setup page) and finish acceptance steps 4–5 and 14–15 in the app; confirm which credential source the gate reports.
+1. Complete "Set up Claude" once with a real Console account and finish acceptance steps 4–5 and 14–15 in the app. Confirm the gate reports `/login managed key`.
 2. Optional OS-level backend:
    - Android: adb `input` and the UiAutomation helper.
    - iOS simulator: Callstack agent-device (MIT, pinned) or a minimal public-API XCUITest runner.

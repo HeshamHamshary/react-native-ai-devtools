@@ -36,7 +36,7 @@ It is a development and QA tool. When `__DEV__` is false it renders only your ap
   - native alerts
   - screenshots, with optional ref-labelled boxes
 - **Two ways to talk to it:**
-  - The in-app floating chat, backed by the Claude Agent SDK with an API key on your computer.
+  - The in-app floating chat, backed by the Claude Agent SDK. One tap on "Set up Claude" signs in with your Anthropic Console account in your computer's browser.
   - Your existing Claude Code terminal session, through the server's MCP endpoint, using your normal Claude Code login.
 
 ## Quick start (example app)
@@ -50,7 +50,6 @@ node .yarn/releases/yarn-4.11.0.cjs install
 
 # 2. Start the devtools server (terminal 1)
 node .yarn/releases/yarn-4.11.0.cjs server --repo apps/example
-#   for the in-app chat, put ANTHROPIC_API_KEY in this terminal's environment first
 
 # 3. Start Metro (terminal 2)
 node .yarn/releases/yarn-4.11.0.cjs example start
@@ -59,9 +58,9 @@ node .yarn/releases/yarn-4.11.0.cjs example start
 node .yarn/releases/yarn-4.11.0.cjs example ios       # or: example android
 ```
 
-Tap the ✦ button, then ask "What screen am I on?". The demo login is any email plus `password123`.
+Tap the ✦ button. The first time, tap **Set up Claude** and finish signing in in your computer's browser. Then ask "What screen am I on?". The demo login is any email plus `password123`.
 
-No API key? Run the server with `--demo-agent` for a clearly labelled scripted assistant (UI development only). Or connect Claude Code instead:
+No Console account? Run the server with `--demo-agent` for a clearly labelled scripted assistant (UI development only). Or connect Claude Code instead:
 
 ```bash
 claude mcp add --transport http rn-agent http://127.0.0.1:8765/mcp

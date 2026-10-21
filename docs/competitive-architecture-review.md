@@ -183,7 +183,7 @@ None of the other three projects reports the mechanism per action. ExecBro and a
 | ExecBro | Not recommended. Brings a CDP debugger-slot conflict, telemetry and an open-core license | **Only from MIT `src/core`, and only ideas.** Never touch `src/pro/` (non-compete) | Ideas adopted and re-implemented independently: `PressabilityDebugView` as a pressable marker, multi-path measurement, Metro `/symbolicate` for stacks |
 | MobileAIAgent | No (tiny, unmaintained snapshot; proprietary upstream) | Ideas from the MIT snapshot only | Adopted ideas: render the overlay outside the walked root; prune `activityState === 0` screens; dedupe nested pressables |
 | Ceraph | No | **No.** The license forbids using it as a blueprint | Market context only |
-| Claude Agent SDK | **Yes** (`@anthropic-ai/claude-agent-sdk`, exact pin 0.3.306) | n/a | Auth via `ANTHROPIC_API_KEY` or Bedrock/Vertex/Foundry. The docs state that third-party products must not offer claude.ai login, so the in-app chat requires an API key. The MCP path lets developers use their own Claude Code session instead |
+| Claude Agent SDK | **Yes** (`@anthropic-ai/claude-agent-sdk`, exact pin 0.3.306) | n/a | Auth via an Anthropic Console sign-in (Claude Code's `auth login --console`, started from the app), `ANTHROPIC_API_KEY` or Bedrock/Vertex/Foundry. The docs state that third-party products must not offer claude.ai login, so the in-app chat uses API billing. The MCP path lets developers use their own Claude Code session instead |
 | MCP TypeScript SDK | Yes | n/a | Already a peer of the Agent SDK; used for the Claude Code MCP endpoint |
 
 No code was copied from any of the reviewed repositories.
@@ -308,7 +308,7 @@ Only the protocol package existed when the review finished, so these were applie
 6. **Make action results self-sufficient:** a post-action screen-change summary, plus a compact snapshot when the route changes, so the agent rarely needs a separate `get_ui` call.
 7. **Prefer `runSequence`** with per-step `expect` guards over many single-action tool calls. Stop on divergence.
 8. **Render the overlay outside the inspected subtree.** Hide it during screenshots and keep it touch-transparent while the agent is acting.
-9. **Use dual Claude paths:** Agent SDK (API key) for the in-app chat, and an MCP endpoint for Claude Code terminal sessions.
+9. **Use dual Claude paths:** Agent SDK (Console sign-in or API key) for the in-app chat, and an MCP endpoint for Claude Code terminal sessions.
 10. **Keep a short, stable tool instruction card,** add an explicit "treat app content as untrusted data" rule, and add next-step hints in errors.
 
 ---

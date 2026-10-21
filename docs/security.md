@@ -10,14 +10,17 @@ This is a development tool with a lot of power: it can read the screen, operate 
 
 ## No credentials in the app
 
-- The model runs on the developer machine. The app never holds an API key and never talks to a model provider.
-- Pasted keys are stored on the computer only, in `~/.config/react-native-agent-devtools/credentials.json`:
-  - The file is mode 0600, inside a 0700 directory.
-  - Keys are never logged, echoed or sent to devices.
+- The model runs on the developer machine. The app never holds a credential and never talks to a model provider.
+- **"Set up Claude" signs in on the computer.**
+  - The server runs Claude Code's `claude auth login --console` (Anthropic Console, API billing) in the computer's browser.
+  - The resulting key lives in a config directory used only by the agent (`~/.config/react-native-agent-devtools/claude`, mode 0700), stored however Claude Code stores its own login (on macOS, the Keychain).
+  - The server never reads, logs or sends that credential. Devices only learn whether the agent is available.
 - **The agent never runs on a personal claude.ai login:**
-  - The SDK subprocess gets an isolated `CLAUDE_CONFIG_DIR`.
+  - Every Claude Code process the server starts gets that dedicated `CLAUDE_CONFIG_DIR`, so the developer's own `~/.claude` login is never visible. A test runs the real binary to confirm a fresh directory reports "signed out".
+  - `CLAUDE_CODE_OAUTH_TOKEN` and `ANTHROPIC_PROFILE` are removed from its environment, and `ant` profiles are hidden.
   - Before the first prompt, the server checks the credential source with `accountInfo()` (a local control request, no model call).
-  - It accepts only `ANTHROPIC_API_KEY`, `apiKeyHelper` or a cloud provider. Anything else fails closed.
+  - It accepts only `ANTHROPIC_API_KEY`, `apiKeyHelper`, the Console sign-in key (`/login managed key`) or a cloud provider, and never anything reporting a subscription. Anything else fails closed.
+  - If the API rejects the credentials mid-session (for example, a revoked key), the agent turns off and the app shows "Set up Claude" again.
 
   This guard exists because, during development, an invalid `ANTHROPIC_API_KEY` was observed being silently ignored in favor of a stored Claude Code login.
 
@@ -28,7 +31,8 @@ This is a development tool with a lot of power: it can read the screen, operate 
 | WebSocket for devices | `127.0.0.1` only | Host header allowlist (DNS rebinding); Origin must be absent or same-origin (browsers can't connect cross-site); `hello` required within 5 s; message size and type validation |
 | Simulators/emulators | loopback (`localhost`, `10.0.2.2`) | as above |
 | `--lan` | all interfaces, with a printed warning | 8-char single-use pairing codes (10 min TTL, lockout after 5 failures) → 12 h device tokens; plain `ws://`, so trusted networks only |
-| `/mcp`, `/api/*`, `/setup*` | loopback only, **even with `--lan`** | Origin/Host checks; `/setup/key` is JSON-only (no simple cross-site form posts), with CSP and `frame-ancestors 'none'` |
+| `/mcp`, `/api/*` | loopback only, **even with `--lan`** | Origin/Host checks |
+| Sign-in | started only by a connected (and, on LAN, paired) device's `setup.open` | runs on the computer; one attempt at a time, 10-minute timeout, cancelled on shutdown |
 
 ## Agent permissions (least privilege)
 

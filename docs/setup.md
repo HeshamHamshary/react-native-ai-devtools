@@ -62,13 +62,15 @@ npx react-native-agent-devtools-server bench --iterations 20 --device android
 
 There are two supported paths:
 
-1. **In-app chat (Claude Agent SDK).** It needs an Anthropic API key or cloud credentials on your computer.
-   - **Easiest: tap "Set up Claude" in the app's panel.** Your computer's browser opens `http://127.0.0.1:8765/setup`. Sign in to the Anthropic Console, create an API key, and paste it on that page. The key is validated, saved only on your computer (`~/.config/react-native-agent-devtools/credentials.json`, mode 0600), and the chat activates without a restart. You can also open that page yourself.
-   - **Or** start the server with `ANTHROPIC_API_KEY` (or `CLAUDE_CODE_USE_BEDROCK=1` / `CLAUDE_CODE_USE_VERTEX=1` and the cloud credentials) in its environment. The environment takes precedence over a saved key.
+1. **In-app chat (Claude Agent SDK).**
+   - **Tap "Set up Claude" in the app's panel.** Your computer's browser opens Anthropic's sign-in page. Sign in with your Anthropic Console account and approve; the chat turns on by itself. Nothing to copy or paste.
 
-   API usage is billed to the Console account that owns the key. If your organization manages API keys, use the one it provides.
+     Under the hood, the server runs Claude Code's documented `claude auth login --console`, using the Claude Code binary bundled with the Agent SDK. It runs in a config directory used only by the agent (`~/.config/react-native-agent-devtools/claude`), so it never touches your own Claude Code login. Approving creates an API key in your Console organization, managed by Claude Code. Usage is billed to that organization at API rates. If your organization controls who may create API keys, check with your admin first.
+   - **No browser on this machine (SSH)?** Run `react-native-agent-devtools-server login` in a terminal. It prints a link and accepts the code back.
+   - **Or** start the server with `ANTHROPIC_API_KEY` (or `CLAUDE_CODE_USE_BEDROCK=1` / `CLAUDE_CODE_USE_VERTEX=1` and the cloud credentials) in its environment. The environment takes precedence over the sign-in.
+   - **Sign out:** `react-native-agent-devtools-server logout`.
 
-   The key never reaches the app. The server also refuses to run the agent on a personal claude.ai (Pro/Max) login. Anthropic's Agent SDK terms don't allow products to use it, and Claude Code can otherwise prefer a stored login over `ANTHROPIC_API_KEY`. Before the first prompt, the server checks which credential source the agent would use and fails closed.
+   Credentials never reach the app. Signing in with a Claude subscription (Pro, Max, Team or Enterprise chat plans) is not offered and is refused if found. Anthropic's Agent SDK terms don't allow products to use claude.ai login, which is the main difference from the Claude in Chrome extension. To use your subscription, take path 2. Before the first prompt, the server checks which credential source the agent would use (`accountInfo()`, no model call) and fails closed.
 2. **Claude Code.** Uses your own Claude Code login.
    ```bash
    claude mcp add --transport http rn-agent http://127.0.0.1:8765/mcp
