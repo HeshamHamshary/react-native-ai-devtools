@@ -8,6 +8,7 @@ import type {
   ScreenshotResult,
   ServerInfo,
   ServerMessage,
+  SetupState,
   TurnStats,
 } from 'react-native-agent-devtools-protocol';
 import { PROTOCOL_VERSION, parseTarget, validateAction, validateSequence } from 'react-native-agent-devtools-protocol';
@@ -54,6 +55,8 @@ export interface UIState {
   pendingConfirm?: PendingConfirm;
   overlayHidden: boolean;
   lastStats?: TurnStats;
+  /** Anthropic sign-in started from "Set up Claude" (cleared once the agent is available). */
+  setup?: { state: SetupState; message?: string };
 }
 
 export interface RuntimeOptions {
@@ -218,9 +221,10 @@ export class Runtime {
     this.store.set({ connection: 'idle', connectionDetail: 'disconnected by user', chat: 'idle' });
   }
 
-  /** Ask the server to open its local API-key setup page in the computer's browser. */
+  /** Ask the server to start Anthropic sign-in in the computer's browser. */
   openSetup(): boolean {
     if (!this.conn?.isOpen) return false;
+    this.store.set({ setup: { state: 'waiting' } });
     this.send({ type: 'setup.open' });
     return true;
   }
@@ -329,7 +333,17 @@ export class Runtime {
           (globalThis as { __RNAD_DEVICE_TOKEN__?: string }).__RNAD_DEVICE_TOKEN__ = m.deviceToken;
         }
         this.pairingCode = undefined;
-        this.store.set({ connection: 'connected', connectionDetail: undefined, server: m.server });
+        this.store.set({
+          connection: 'connected',
+          connectionDetail: undefined,
+          server: m.server,
+          setup: undefined,
+          // A re-welcome without an agent (e.g. credentials rejected mid-turn) ends any turn in progress.
+          ...(m.server.agent.available ? {} : { chat: 'idle' as const }),
+        });
+        break;
+      case 'setup.status':
+        this.store.set({ setup: { state: m.state, ...(m.message ? { message: m.message } : {}) } });
         break;
       case 'auth.required':
         this.deviceToken = undefined;

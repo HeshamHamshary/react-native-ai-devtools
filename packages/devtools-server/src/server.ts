@@ -3,10 +3,8 @@ import { randomUUID } from 'node:crypto';
 import { WebSocketServer, type WebSocket } from 'ws';
 import type { ClientMessage, ServerInfo } from 'react-native-agent-devtools-protocol';
 import { MAX_MESSAGE_BYTES, encode, isRpcMethod, parseClientMessage, redactText } from 'react-native-agent-devtools-protocol';
-import { execFile } from 'node:child_process';
-import { AgentSession, agentAvailability, validateApiKey, verifyAgentAuth } from './agent/AgentSession.ts';
-import { CredentialStore, resolveApiKey } from './security/credentials.ts';
-import { setupPageHtml } from './transport/setupPage.ts';
+import { claudeCodeSignIn, hasEnvCredentials, type SignInBackend, type SignInHandle } from './agent/account.ts';
+import { AgentSession, verifyAgentAuth } from './agent/AgentSession.ts';
 import { DemoSession } from './agent/DemoSession.ts';
 import { Pairing, checkRequestOrigin, isLoopback } from './security/auth.ts';
 import { RepoAccess } from './security/repoAccess.ts';
@@ -30,14 +28,12 @@ export interface ServerOptions {
   log: (line: string) => void;
   /** Scripted, clearly-labelled replies for UI development without credentials. */
   demoAgent?: boolean;
-  /** Where the pasted API key is stored (defaults to ~/.config/react-native-agent-devtools). */
-  credentials?: CredentialStore;
+  /** For tests: replace Anthropic sign-in (defaults to `claude auth login --console`). */
+  signIn?: SignInBackend;
   /** For tests: replace the credential-source check (spawns the Claude Code subprocess). */
-  verifyAuth?: (apiKey?: string) => Promise<{ ok: boolean; source: string; reason?: string }>;
+  verifyAuth?: () => Promise<{ ok: boolean; source: string; reason?: string }>;
   /** For tests: replace agent session creation. */
   sessionFactory?: (device: DeviceSession) => AgentSession | DemoSession | undefined;
-  /** For tests: skip the live key validation call. */
-  validateKey?: (key: string) => Promise<{ ok: boolean; reason?: string }>;
   /** For tests: override credential detection. */
   agentAvailable?: { available: boolean; reason?: string };
 }
@@ -80,17 +76,21 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
   const devices = new DeviceRegistry();
   const pairing = new Pairing();
   const repo = new RepoAccess(opts.repoRoots);
-  const store = opts.credentials ?? new CredentialStore();
+  const signIn = opts.signIn ?? claudeCodeSignIn;
+  let pendingSignIn: SignInHandle | undefined;
+  /** Set when the API rejects the credentials mid-session; cleared by a new sign-in. */
+  let authRejected: string | undefined;
   const computeAvailability = async (): Promise<{ available: boolean; reason?: string; source?: string }> => {
     if (opts.demoAgent) return { available: true, source: 'demo agent (scripted, no model)' };
     if (opts.agentAvailable) return opts.agentAvailable;
     if (!opts.agent) return { available: false, reason: 'agent disabled (--no-agent)' };
-    const key = resolveApiKey(store);
-    const base = agentAvailability(key.key ? { ...process.env, ANTHROPIC_API_KEY: key.key } : process.env);
-    if (!base.available) return base;
+    if (authRejected) return { available: false, reason: `${authRejected} Tap "Set up Claude" to sign in again.` };
+    if (!hasEnvCredentials() && !(await signIn.status()).loggedIn) {
+      return { available: false, reason: 'Not signed in. Tap "Set up Claude" to sign in with your Anthropic Console account.' };
+    }
     // Local control request only; no prompt is sent and no model is called.
-    const v = await (opts.verifyAuth ?? verifyAgentAuth)(key.key);
-    return v.ok ? { available: true, source: key.source === 'stored' ? `${v.source} (saved key)` : v.source } : { available: false, reason: v.reason };
+    const v = await (opts.verifyAuth ?? verifyAgentAuth)();
+    return v.ok ? { available: true, source: v.source } : { available: false, reason: v.reason };
   };
   let availability = await computeAvailability();
   const sessions = new Map<string, AgentSession | DemoSession>();
@@ -130,12 +130,17 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
     if (opts.sessionFactory) return opts.sessionFactory(device);
     const s = new AgentSession(device, {
       model: opts.model,
-      apiKey: resolveApiKey(store).key,
       repo,
       allowEdits: opts.allowEdits,
       loadProjectSettings: opts.loadProjectSettings,
       log,
       approve,
+      onAuthError: (reason) => {
+        if (authRejected) return;
+        authRejected = reason;
+        log(`agent credentials rejected: ${reason}`);
+        void refreshAgent();
+      },
     });
     s.start();
     return s;
@@ -154,11 +159,27 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
     log(`agent ${availability.available ? `ready (credentials: ${availability.source})` : `unavailable: ${availability.reason}`}`);
   };
 
-  const openSetupPage = () => {
-    const url = `http://127.0.0.1:${port}/setup`;
-    const [cmd, args] =
-      process.platform === 'darwin' ? ['open', [url]] : process.platform === 'win32' ? ['cmd', ['/c', 'start', '', url]] : ['xdg-open', [url]];
-    execFile(cmd as string, args as string[], (err) => log(err ? `could not open a browser (${err.message}); visit ${url}` : `opened ${url}`));
+  const broadcast = (m: Parameters<DeviceSession['send']>[0]) => devices.list().forEach((d) => d.send(m));
+
+  /** Anthropic Console sign-in in the computer's browser. Tapping again restarts it (e.g. after closing the tab). */
+  const startSignIn = () => {
+    pendingSignIn?.cancel();
+    const attempt = signIn.start(log);
+    pendingSignIn = attempt;
+    log('sign-in started: finish it in your browser');
+    broadcast({ type: 'setup.status', state: 'waiting', message: 'Finish signing in in the browser on your computer.' });
+    void attempt.done.then(async (r) => {
+      if (pendingSignIn !== attempt) return; // superseded by a newer attempt
+      pendingSignIn = undefined;
+      if (!r.ok) {
+        log(`sign-in failed: ${r.reason ?? 'unknown error'}`);
+        broadcast({ type: 'setup.status', state: 'failed', message: r.reason ?? 'Sign-in did not complete.' });
+        return;
+      }
+      authRejected = undefined;
+      await refreshAgent();
+      if (!availability.available) broadcast({ type: 'setup.status', state: 'failed', message: availability.reason ?? 'The agent still cannot start.' });
+    });
   };
 
   // ---------------------------------------------------------------- HTTP
@@ -172,38 +193,6 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
     // Everything below controls the app: loopback only, even in LAN mode.
     if (!isLoopback(req.socket.remoteAddress)) return json(res, 403, { error: 'loopback only' });
     try {
-      if (url.pathname === '/setup' && req.method === 'GET') {
-        res.writeHead(200, {
-          'content-type': 'text/html; charset=utf-8',
-          'cache-control': 'no-store',
-          'content-security-policy': "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'",
-          'x-frame-options': 'DENY',
-        });
-        res.end(setupPageHtml({ configured: availability.available, source: availability.source ?? resolveApiKey(store).source, reason: availability.reason }));
-        return;
-      }
-      if (url.pathname === '/setup/key') {
-        // JSON-only: cross-site forms cannot send it without a CORS preflight we never grant.
-        if (!String(req.headers['content-type'] ?? '').startsWith('application/json')) return json(res, 415, { ok: false, error: 'JSON required' });
-        if (req.method === 'DELETE') {
-          store.clear();
-          await refreshAgent();
-          return json(res, 200, { ok: true });
-        }
-        if (req.method === 'POST') {
-          const body = JSON.parse(await readBody(req, 10_000)) as { key?: unknown };
-          const key = typeof body.key === 'string' ? body.key.trim() : '';
-          if (!/^sk-ant-[A-Za-z0-9_-]{20,}$/.test(key)) return json(res, 400, { ok: false, error: 'That does not look like an Anthropic API key (expected sk-ant-…).' });
-          const valid = await (opts.validateKey ?? validateApiKey)(key);
-          if (!valid.ok) return json(res, 400, { ok: false, error: valid.reason });
-          store.save(key);
-          await refreshAgent();
-          return availability.available
-            ? json(res, 200, { ok: true, source: availability.source })
-            : json(res, 400, { ok: false, error: availability.reason });
-        }
-        return json(res, 405, { ok: false, error: 'method not allowed' });
-      }
       if (url.pathname === '/mcp' && mcp) {
         const raw = req.method === 'POST' ? await readBody(req, 2_000_000) : '';
         await mcp(req, res, raw ? JSON.parse(raw) : undefined);
@@ -321,7 +310,7 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
         }
         case 'setup.open':
           if (opts.demoAgent || !opts.agent) return;
-          openSetupPage();
+          startSignIn();
           return;
         case 'approval.response':
           approvals.get(msg.id)?.(msg.approved);
@@ -359,6 +348,7 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
     pairing,
     agent: () => availability,
     close: async () => {
+      pendingSignIn?.cancel();
       sessions.forEach((s) => s.close());
       wss.clients.forEach((c) => c.terminate());
       await new Promise<void>((r) => http.close(() => r()));

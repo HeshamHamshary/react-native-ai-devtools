@@ -6,7 +6,6 @@ import {
   Platform,
   Pressable,
   ScrollView,
-  Share,
   StyleSheet,
   Text,
   TextInput,
@@ -24,7 +23,7 @@ const SUGGESTIONS = ['What screen am I on?', 'Check for errors', 'Take a screens
 function statusText(s: UIState): string {
   switch (s.connection) {
     case 'connected':
-      return s.server?.agent.available === false ? `Connected · agent unavailable` : 'Connected';
+      return s.server?.agent.available === false ? 'Connected · Claude not set up' : 'Connected';
     case 'connecting':
       return 'Connecting…';
     case 'pairing-required':
@@ -146,6 +145,7 @@ export function ChatPanel({ runtime, palette: p, insets, collapsed, onExpand, on
 
   const confirm = state.pendingConfirm;
   const pairing = state.connection === 'pairing-required';
+  const needsSetup = state.server?.agent.available === false;
 
   return (
     <Animated.View
@@ -177,19 +177,18 @@ export function ChatPanel({ runtime, palette: p, insets, collapsed, onExpand, on
       <ScrollView
         ref={scrollRef as never}
         style={styles.messages}
-        contentContainerStyle={styles.messagesContent}
+        contentContainerStyle={[styles.messagesContent, needsSetup ? styles.centered : null]}
         keyboardShouldPersistTaps="handled"
         onContentSizeChange={() => {
           if (state.messages.length) scrollRef.current?.scrollToEnd({ animated: true });
         }}
       >
-        {state.server?.agent.available === false ? (
-          <ConnectClaude p={p} serverUrl={state.serverUrl} canSetup={state.server.agent.setup === true} onSetup={() => runtime.openSetup()} />
-        ) : null}
-        {state.messages.length === 0 ? (
+        {needsSetup ? (
+          <SetUpClaude p={p} setup={state.setup} canSetup={state.server?.agent.setup === true} onSetup={() => runtime.openSetup()} />
+        ) : state.messages.length === 0 ? (
           <View style={styles.empty}>
             <Text style={[styles.emptyTitle, { color: p.text }]}>Ask about this screen, or tell the agent what to do.</Text>
-            <View style={[styles.chips, state.server?.agent.available === false ? styles.hidden : null]}>
+            <View style={styles.chips}>
               {SUGGESTIONS.map((s) => (
                 <Pressable key={s} onPress={() => runtime.sendChat(s)} disabled={state.connection !== 'connected'} style={[styles.chip, { borderColor: p.border }]}>
                   <Text style={[styles.chipText, { color: p.text }]}>{s}</Text>
@@ -223,7 +222,7 @@ export function ChatPanel({ runtime, palette: p, insets, collapsed, onExpand, on
         </View>
       ) : null}
 
-      {pairing ? (
+      {needsSetup && !pairing ? null : pairing ? (
         <View style={[styles.composer, { borderColor: p.border }]}>
           <TextInput
             value={code}
@@ -244,14 +243,7 @@ export function ChatPanel({ runtime, palette: p, insets, collapsed, onExpand, on
           <TextInput
             value={draft}
             onChangeText={setDraft}
-            placeholder={
-              state.connection !== 'connected'
-                ? 'Waiting for the devtools server…'
-                : state.server?.agent.available === false
-                  ? 'In-app agent not configured (see above)'
-                  : 'Message the agent…'
-            }
-            editable={state.server?.agent.available !== false}
+            placeholder={state.connection !== 'connected' ? 'Waiting for the devtools server…' : 'Message the agent…'}
             placeholderTextColor={p.muted}
             multiline
             style={[styles.input, { color: p.text, backgroundColor: p.surface }]}
@@ -276,47 +268,26 @@ export function ChatPanel({ runtime, palette: p, insets, collapsed, onExpand, on
 }
 
 /**
- * Shown when the server has no model credentials. There is no supported way for
- * a third-party tool to offer claude.ai login, so explain the two supported paths.
+ * Shown until the agent has credentials. The server signs in with the developer's
+ * Anthropic Console account in the computer's browser (Claude Code's own
+ * `auth login --console`), and the chat turns on by itself when that finishes.
  */
-function ConnectClaude({ p, serverUrl, canSetup, onSetup }: { p: Palette; serverUrl: string; canSetup: boolean; onSetup: () => boolean }) {
-  const [opened, setOpened] = useState(false);
-  const port = /:(\d+)/.exec(serverUrl.replace(/^ws:\/\//, ''))?.[1] ?? '8765';
-  const command = `claude mcp add --transport http rn-agent http://127.0.0.1:${port}/mcp`;
+function SetUpClaude({ p, setup, canSetup, onSetup }: { p: Palette; setup: UIState['setup']; canSetup: boolean; onSetup: () => boolean }) {
+  if (!canSetup) return <Text style={[styles.setupNote, { color: p.muted }]}>The in-app agent is turned off on the devtools server.</Text>;
+  const waiting = setup?.state === 'waiting';
   return (
-    <View style={[styles.connect, { borderColor: p.border, backgroundColor: p.surface }]}>
-      <Text style={[styles.connectTitle, { color: p.text }]}>Connect Claude</Text>
-      {canSetup ? (
-        <>
-          <Pressable
-            accessibilityRole="button"
-            onPress={() => setOpened(onSetup())}
-            style={({ pressed }) => [styles.setupBtn, { backgroundColor: p.accent, opacity: pressed ? 0.85 : 1 }]}
-          >
-            <Text style={[styles.setupBtnText, { color: p.accentText }]}>Set up Claude</Text>
-          </Pressable>
-          <Text style={[styles.connectStep, { color: opened ? p.ok : p.muted }]}>
-            {opened
-              ? 'A setup page opened on your computer. Sign in to the Anthropic Console, create an API key and paste it there; this chat activates automatically.'
-              : 'Opens a page on your computer: sign in to the Anthropic Console, create an API key and paste it. The key stays on your computer.'}
-          </Text>
-          <View style={[styles.divider, { backgroundColor: p.border }]} />
-        </>
-      ) : null}
-      <Text style={[styles.connectStep, { color: p.text }]}>
-        <Text style={styles.bold}>Use your Claude Code login: </Text>
-        run this once on your computer, then ask Claude Code (in the terminal) to inspect or drive this app.
-      </Text>
-      <Text selectable style={[styles.command, { color: p.text, backgroundColor: p.code, borderColor: p.border }]}>
-        {command}
-      </Text>
-      <Pressable accessibilityRole="button" onPress={() => Share.share({ message: command })} style={[styles.shareBtn, { borderColor: p.border }]}>
-        <Text style={[styles.chipText, { color: p.text }]}>Share / copy command</Text>
+    <View style={styles.setup}>
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel="Set up Claude"
+        accessibilityState={{ busy: waiting }}
+        onPress={onSetup}
+        style={({ pressed }) => [styles.setupBtn, { backgroundColor: p.accent, opacity: pressed ? 0.85 : 1 }]}
+      >
+        {waiting ? <ActivityIndicator size="small" color={p.accentText} /> : null}
+        <Text style={[styles.setupBtnText, { color: p.accentText }]}>{waiting ? 'Finish signing in on your computer' : 'Set up Claude'}</Text>
       </Pressable>
-      <Text style={[styles.connectStep, { color: p.text }]}>
-        <Text style={styles.bold}>Or set it in the terminal: </Text>
-        start the server with ANTHROPIC_API_KEY (or Bedrock/Vertex credentials) in its environment. Organization accounts: use the key your admin provides.
-      </Text>
+      {setup?.state === 'failed' ? <Text style={[styles.setupNote, { color: p.error }]}>{setup.message ?? 'Sign-in did not complete.'}</Text> : null}
     </View>
   );
 }
@@ -428,16 +399,11 @@ const styles = StyleSheet.create({
   compactMain: { flex: 1, flexDirection: 'row', alignItems: 'center', gap: 10 },
   compactText: { flex: 1, fontSize: 13.5 },
   stopSmall: { width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center' },
-  bold: { fontWeight: '700' },
-  hidden: { display: 'none' },
-  connect: { borderWidth: StyleSheet.hairlineWidth, borderRadius: 12, padding: 12, gap: 8 },
-  connectTitle: { fontSize: 15, fontWeight: '700' },
-  connectStep: { fontSize: 13.5, lineHeight: 19 },
-  setupBtn: { alignSelf: 'stretch', alignItems: 'center', borderRadius: 12, paddingVertical: 11 },
-  setupBtnText: { fontSize: 15, fontWeight: '700' },
-  divider: { height: StyleSheet.hairlineWidth, marginVertical: 4 },
-  command: { fontFamily: Platform.select({ ios: 'Menlo', default: 'monospace' }), fontSize: 11.5, padding: 8, borderRadius: 8, borderWidth: StyleSheet.hairlineWidth },
-  shareBtn: { alignSelf: 'flex-start', borderWidth: StyleSheet.hairlineWidth, borderRadius: 14, paddingHorizontal: 12, paddingVertical: 6 },
+  centered: { flexGrow: 1, justifyContent: 'center' },
+  setup: { alignItems: 'center', gap: 10 },
+  setupBtn: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, borderRadius: 14, paddingHorizontal: 22, paddingVertical: 13 },
+  setupBtnText: { fontSize: 16, fontWeight: '700' },
+  setupNote: { fontSize: 13, lineHeight: 18, textAlign: 'center' },
   perf: { marginHorizontal: 12, marginTop: 8, borderWidth: StyleSheet.hairlineWidth, borderRadius: 10, padding: 10, gap: 3 },
   perfText: { fontSize: 11.5 },
 });

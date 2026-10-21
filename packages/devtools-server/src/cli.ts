@@ -1,9 +1,11 @@
 #!/usr/bin/env node
+import { spawn } from 'node:child_process';
 import { existsSync, statSync } from 'node:fs';
 import { networkInterfaces } from 'node:os';
 import { resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 
+import { agentEnv, claudeBinary } from './agent/account.ts';
 import { SERVER_VERSION, startServer } from './server.ts';
 
 const c = {
@@ -24,6 +26,8 @@ Usage:
   react-native-agent-devtools-server bench [--iterations N] [--port N]
                                                          Measure device-side latency (no model)
   react-native-agent-devtools-server devices [--port N]  List connected apps
+  react-native-agent-devtools-server login               Sign the in-app agent in (same as "Set up Claude" in the app)
+  react-native-agent-devtools-server logout              Sign the in-app agent out
 
 Options:
   --port <n>             Port (default 8765)
@@ -37,8 +41,9 @@ Options:
   --demo-agent           Scripted replies (labelled, no model) for UI development
   -h, --help
 
-The in-app chat uses the Claude Agent SDK and needs ANTHROPIC_API_KEY (or Bedrock/Vertex
-credentials) in this process's environment. To drive the app from Claude Code instead:
+The in-app chat uses the Claude Agent SDK. Tap "Set up Claude" in the app to sign in with your
+Anthropic Console account (API usage billing). ANTHROPIC_API_KEY or Bedrock/Vertex credentials in
+this process's environment also work. To drive the app from Claude Code instead:
   claude mcp add --transport http rn-agent http://127.0.0.1:8765/mcp
 `;
 
@@ -104,6 +109,16 @@ async function main() {
     return;
   }
 
+  if (command === 'login' || command === 'logout') {
+    const bin = claudeBinary();
+    if (!bin) throw new Error('the Claude Code binary bundled with the Agent SDK is missing; reinstall dependencies');
+    // Interactive, so the paste-a-code fallback works on machines without a local browser.
+    const args = command === 'login' ? ['auth', 'login', '--console'] : ['auth', 'logout'];
+    const child = spawn(bin, args, { env: agentEnv(), stdio: 'inherit' });
+    process.exitCode = await new Promise<number>((r) => child.on('close', (code) => r(code ?? 1)));
+    return;
+  }
+
   if (command === 'bench') {
     const n = Number(values.iterations);
     const ops: [string, string, unknown][] = [
@@ -165,7 +180,7 @@ async function main() {
     `  ${c.bold('listening')}    ws://${values.lan ? '0.0.0.0' : '127.0.0.1'}:${server.port} ${c.dim(values.lan ? '(all interfaces)' : '(loopback only)')}`,
     `  ${c.bold('simulators')}   iOS simulator and Android emulator connect automatically via the Metro host`,
     `               ${c.dim(`USB Android: adb reverse tcp:${server.port} tcp:${server.port}`)}`,
-    `  ${c.bold('agent')}        ${avail.available ? c.green('ready') + c.dim(` (credentials: ${avail.source}${values.model ? `, model ${values.model}` : ''})`) : c.yellow(`not configured — open http://127.0.0.1:${server.port}/setup (or tap "Set up Claude" in the app)`)}`,
+    `  ${c.bold('agent')}        ${avail.available ? c.green('ready') + c.dim(` (credentials: ${avail.source}${values.model ? `, model ${values.model}` : ''})`) : c.yellow(`not signed in — tap "Set up Claude" in the app`) + c.dim(avail.reason && !avail.reason.startsWith('Not signed in') ? ` (${avail.reason})` : '')}`,
     `  ${c.bold('repo access')}  ${repoRoots.length ? `read${values['allow-edits'] ? ' + approved edits' : '-only'}: ${repoRoots.join(', ')} ${c.dim('(secret files always excluded)')}` : c.dim('disabled (use --repo <path>)')}`,
     `  ${c.bold('Claude Code')}  ${values['no-mcp'] ? c.dim('MCP disabled') : `claude mcp add --transport http rn-agent http://127.0.0.1:${server.port}/mcp`}`,
   ];

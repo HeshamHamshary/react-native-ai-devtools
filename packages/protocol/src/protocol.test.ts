@@ -62,6 +62,13 @@ test('server rpc.call only allows known methods', () => {
   assert.equal(parseServerMessage(JSON.stringify({ type: 'rpc.call', id: '1', method: 'eval', params: {} })).ok, false);
 });
 
+test('setup.status is validated and stripped', () => {
+  const ok = parseServerMessage(JSON.stringify({ type: 'setup.status', state: 'failed', message: 'Sign-in timed out.', extra: 1 }));
+  assert.deepEqual(ok, { ok: true, msg: { type: 'setup.status', state: 'failed', message: 'Sign-in timed out.' } });
+  assert.equal(parseServerMessage(JSON.stringify({ type: 'setup.status', state: 'done' })).ok, false);
+  assert.equal(parseServerMessage(JSON.stringify({ type: 'setup.status', state: 'waiting', message: 'x'.repeat(501) })).ok, false);
+});
+
 test('parseTarget understands compact strings', () => {
   assert.deepEqual(parseTarget('e12'), { ref: 'e12' });
   assert.deepEqual(parseTarget('@E3'), { ref: 'e3' });

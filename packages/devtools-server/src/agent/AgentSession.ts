@@ -17,6 +17,7 @@ import { redactText } from 'react-native-agent-devtools-protocol';
 import type { RepoAccess } from '../security/repoAccess.ts';
 import { CONTROL_TOOLS, MOBILE_TOOLS } from '../tools/mobileTools.ts';
 import type { DeviceSession } from '../transport/devices.ts';
+import { agentEnv } from './account.ts';
 import { AsyncQueue } from './AsyncQueue.ts';
 import { appStateBlock, systemPrompt } from './prompt.ts';
 
@@ -26,77 +27,38 @@ export interface AgentConfig {
   allowEdits: boolean;
   loadProjectSettings: boolean;
   log: (msg: string) => void;
-  /** API key from the server environment or the local credential store. */
-  apiKey?: string;
   /** Ask the developer on the device (used for repository edits). */
   approve: (device: DeviceSession, title: string, detail: string) => Promise<boolean>;
-}
-
-export function agentAvailability(env = process.env): { available: boolean; reason?: string } {
-  if (env.ANTHROPIC_API_KEY || env.CLAUDE_CODE_USE_BEDROCK === '1' || env.CLAUDE_CODE_USE_VERTEX === '1' || env.CLAUDE_CODE_USE_FOUNDRY === '1') {
-    return { available: true };
-  }
-  return {
-    available: false,
-    reason:
-      'No model credentials in the server environment. Set ANTHROPIC_API_KEY (or CLAUDE_CODE_USE_BEDROCK=1 / CLAUDE_CODE_USE_VERTEX=1 with cloud credentials) and restart the server. You can still drive the app from Claude Code via the MCP endpoint.',
-  };
+  /** The API rejected the credentials mid-session (expired or revoked sign-in). */
+  onAuthError?: (reason: string) => void;
 }
 
 const CLOUD_PROVIDERS = new Set(['bedrock', 'vertex', 'foundry', 'anthropicAws', 'anthropicGoogleCloud', 'mantle']);
-const API_KEY_SOURCES = new Set(['ANTHROPIC_API_KEY', 'apiKeyHelper']);
+/** '/login managed key' is the API key Claude Code creates when you sign in with an Anthropic Console account. */
+const API_KEY_SOURCES = new Set(['ANTHROPIC_API_KEY', 'apiKeyHelper', '/login managed key']);
 
 /**
- * The in-app agent may only run on credentials the developer configured for this
- * server: an API key or a cloud provider. A personal claude.ai login (OAuth) is
- * never acceptable: Anthropic's Agent SDK terms do not allow products to use it,
- * and Claude Code can silently prefer a stored login over ANTHROPIC_API_KEY.
+ * The in-app agent may only run on API-billed credentials: an API key (including the
+ * one created by Anthropic Console sign-in) or a cloud provider. A personal claude.ai
+ * subscription login is never acceptable: Anthropic's Agent SDK terms do not allow
+ * products to use it. Anything unrecognized fails closed.
  */
 export function authDecision(info: AccountInfo | undefined): { ok: boolean; source: string; reason?: string } {
   if (!info) return { ok: false, source: 'unknown', reason: 'could not determine which credentials the agent would use' };
   if (info.apiProvider && CLOUD_PROVIDERS.has(info.apiProvider)) return { ok: true, source: info.apiProvider };
-  if (info.apiKeySource && API_KEY_SOURCES.has(info.apiKeySource)) return { ok: true, source: info.apiKeySource };
+  if (info.apiKeySource && API_KEY_SOURCES.has(info.apiKeySource) && !info.subscriptionType) return { ok: true, source: info.apiKeySource };
   const source = info.apiKeySource ?? info.tokenSource ?? 'unknown';
   return {
     ok: false,
     source,
-    reason: `the agent would authenticate with "${source}"${info.subscriptionType ? ` (${info.subscriptionType} subscription login)` : ''}, not with a configured API key. The in-app chat only runs on ANTHROPIC_API_KEY or Bedrock/Vertex/Foundry credentials.`,
+    reason: `the agent would authenticate with "${source}"${info.subscriptionType ? ` (${info.subscriptionType} subscription login)` : ''}. The in-app chat only runs on an Anthropic Console sign-in, ANTHROPIC_API_KEY or Bedrock/Vertex/Foundry credentials.`,
   };
 }
 
-/** Isolated Claude Code config dir so the subprocess never inherits a personal login, settings or plugins. */
-let isolatedConfigDir: string | undefined;
-function agentEnv(apiKey?: string): Record<string, string> {
-  isolatedConfigDir ??= mkdtempSync(join(tmpdir(), 'rnad-claude-config-'));
-  const env: Record<string, string> = {};
-  for (const [k, v] of Object.entries(process.env)) if (typeof v === 'string') env[k] = v;
-  if (apiKey && !env.ANTHROPIC_API_KEY) env.ANTHROPIC_API_KEY = apiKey;
-  env.CLAUDE_CONFIG_DIR = isolatedConfigDir;
-  return env;
-}
-
-/**
- * Validate an API key against Anthropic's model list endpoint (free, no tokens).
- * Used only for a key the developer just pasted into the local setup page.
- */
-export async function validateApiKey(key: string): Promise<{ ok: boolean; reason?: string }> {
-  try {
-    const res = await fetch('https://api.anthropic.com/v1/models?limit=1', {
-      headers: { 'x-api-key': key, 'anthropic-version': '2023-06-01' },
-      signal: AbortSignal.timeout(10_000),
-    });
-    if (res.ok) return { ok: true };
-    if (res.status === 401 || res.status === 403) return { ok: false, reason: 'Anthropic rejected this key (invalid, revoked or without API access).' };
-    return { ok: false, reason: `Could not validate the key (HTTP ${res.status}). Try again in a moment.` };
-  } catch (e) {
-    return { ok: false, reason: `Could not reach api.anthropic.com to validate the key: ${(e as Error).message}` };
-  }
-}
-
 /** Check credentials without sending any prompt (no model call). */
-export async function verifyAgentAuth(apiKey?: string, timeoutMs = 20_000): Promise<{ ok: boolean; source: string; reason?: string }> {
+export async function verifyAgentAuth(timeoutMs = 20_000): Promise<{ ok: boolean; source: string; reason?: string }> {
   const idle = new AsyncQueue<SDKUserMessage>();
-  const q = query({ prompt: idle, options: { env: agentEnv(apiKey), tools: [], settingSources: [], persistSession: false } });
+  const q = query({ prompt: idle, options: { env: agentEnv(), tools: [], settingSources: [], persistSession: false } });
   try {
     const info = await Promise.race([
       q.accountInfo(),
@@ -241,7 +203,7 @@ export class AgentSession {
         includePartialMessages: true,
         persistSession: false,
         stderr: (data: string) => this.cfg.log(`[agent stderr] ${redactText(data.trim()).slice(0, 500)}`),
-        env: agentEnv(this.cfg.apiKey),
+        env: agentEnv(),
       },
     });
     const q = this.q;
@@ -375,6 +337,7 @@ export class AgentSession {
         return;
       }
       case 'assistant': {
+        if (msg.error === 'authentication_failed') this.cfg.onAuthError?.('Anthropic rejected the agent\'s credentials (the sign-in may have expired or the key was revoked).');
         if (!turn || msg.parent_tool_use_id) return;
         for (const block of msg.message.content) {
           if (block.type === 'tool_use') {

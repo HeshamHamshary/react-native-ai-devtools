@@ -52,7 +52,7 @@ export interface TurnStats {
 
 export interface ServerInfo {
   version: string;
-  agent: { available: boolean; reason?: string; model?: string; /** The server can open a local key setup page. */ setup?: boolean };
+  agent: { available: boolean; reason?: string; model?: string; /** The server can run Anthropic sign-in on the computer. */ setup?: boolean };
   repoAccess: 'none' | 'read' | 'read-write';
   network: 'loopback' | 'lan';
 }
@@ -73,7 +73,7 @@ export type ClientMessage =
   | { type: 'rpc.result'; id: string; ok: true; result: unknown; deviceMs?: number }
   | { type: 'rpc.result'; id: string; ok: false; error: ToolError; deviceMs?: number }
   | { type: 'approval.response'; id: string; approved: boolean }
-  /** Ask the server to open its local credential setup page in the computer's browser. */
+  /** Ask the server to start Anthropic sign-in in the computer's browser. */
   | { type: 'setup.open' }
   | { type: 'ping'; ts: number };
 
@@ -102,7 +102,11 @@ export type ServerMessage =
   | { type: 'rpc.call'; id: string; method: RpcMethod; params: unknown; timeoutMs?: number }
   | { type: 'rpc.cancel'; id: string }
   | { type: 'approval.request'; id: string; title: string; detail: string; risk: 'medium' | 'high' }
+  /** Progress of the sign-in started by `setup.open`. Success arrives as a new `welcome`. */
+  | { type: 'setup.status'; state: SetupState; message?: string }
   | { type: 'pong'; ts: number };
+
+export type SetupState = 'waiting' | 'failed';
 
 /** Largest message accepted on either side (screenshots are the biggest payloads). */
 export const MAX_MESSAGE_BYTES = 8 * 1024 * 1024;
@@ -198,6 +202,10 @@ export function parseServerMessage(raw: unknown): Parsed<ServerMessage> {
       if (!isStr(m.id, 64)) return { ok: false, error: 'rpc.call: invalid id' };
       if (!isRpcMethod(m.method)) return { ok: false, error: `rpc.call: unknown method ${String(m.method)}` };
       return { ok: true, msg: m as ServerMessage };
+    case 'setup.status':
+      if (m.state !== 'waiting' && m.state !== 'failed') return { ok: false, error: 'setup.status: invalid state' };
+      if (m.message !== undefined && !isStr(m.message, 500)) return { ok: false, error: 'setup.status: invalid message' };
+      return { ok: true, msg: { type: 'setup.status', state: m.state, ...(m.message !== undefined ? { message: m.message } : {}) } };
     case 'rpc.cancel':
     case 'chat.delta':
     case 'chat.text':

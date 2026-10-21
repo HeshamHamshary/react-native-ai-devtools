@@ -267,15 +267,12 @@ test('LAN mode requires pairing for non-loopback devices', { skip: !lanIp && 'no
   }
 });
 
-test('key setup page stores a validated key and enables the agent live', async () => {
-  const { mkdtempSync, statSync, readFileSync } = await import('node:fs');
-  const { tmpdir } = await import('node:os');
-  const { join } = await import('node:path');
-  const { CredentialStore } = await import('./security/credentials.ts');
-  const dir = mkdtempSync(join(tmpdir(), 'rnad-cred-'));
-  const store = new CredentialStore(dir);
-  const savedEnv = process.env.ANTHROPIC_API_KEY;
+test('"Set up Claude" runs Anthropic sign-in on the computer and enables the agent live', async () => {
+  const savedKey = process.env.ANTHROPIC_API_KEY;
   delete process.env.ANTHROPIC_API_KEY;
+  let loggedIn = false;
+  let starts = 0;
+  let finish: (r: { ok: boolean; reason?: string }) => void = () => {};
   const s = await startServer({
     port: 0,
     lan: false,
@@ -285,52 +282,51 @@ test('key setup page stores a validated key and enables the agent live', async (
     mcp: false,
     loadProjectSettings: false,
     log: () => {},
-    credentials: store,
-    validateKey: async (k) => (k.endsWith('BAD') ? { ok: false, reason: 'Anthropic rejected this key' } : { ok: true }),
-    verifyAuth: async (k) => (k ? { ok: true, source: 'ANTHROPIC_API_KEY' } : { ok: false, source: 'none', reason: 'no key' }),
+    signIn: {
+      status: async () => ({ loggedIn }),
+      start: () => {
+        starts++;
+        let resolve!: (r: { ok: boolean; reason?: string }) => void;
+        const done = new Promise<{ ok: boolean; reason?: string }>((r) => (resolve = r));
+        finish = resolve;
+        return { done, cancel: () => resolve({ ok: false, reason: 'Sign-in cancelled.' }) };
+      },
+    },
+    verifyAuth: async () => (loggedIn ? { ok: true, source: '/login managed key' } : { ok: false, source: 'none', reason: 'no login' }),
     sessionFactory: () => undefined,
   });
   try {
-    const origin = `127.0.0.1:${s.port}`;
-    assert.equal(s.agent().available, false);
-    const d = new FakeDevice(`ws://${origin}`);
+    const d = new FakeDevice(`ws://127.0.0.1:${s.port}`);
     await d.opened();
     d.hello();
     const w = await d.next('welcome');
     assert.equal(w.server.agent.available, false);
     assert.equal(w.server.agent.setup, true);
+    assert.match(w.server.agent.reason ?? '', /Not signed in/);
 
-    const page = await fetch(`http://${origin}/setup`);
-    assert.equal(page.status, 200);
-    assert.match(page.headers.get('content-security-policy') ?? '', /frame-ancestors 'none'/);
-    assert.match(await page.text(), /Open Anthropic Console/);
+    // A sign-in that doesn't complete is reported, and the button can be used again.
+    d.send({ type: 'setup.open' });
+    assert.equal((await d.next('setup.status')).state, 'waiting');
+    finish({ ok: false, reason: 'Sign-in did not complete.' });
+    const failed = await d.next('setup.status');
+    assert.deepEqual([failed.state, failed.message], ['failed', 'Sign-in did not complete.']);
 
-    const post = (body: unknown, headers: Record<string, string> = { 'content-type': 'application/json' }) =>
-      fetch(`http://${origin}/setup/key`, { method: 'POST', headers, body: JSON.stringify(body) });
-    assert.equal((await post({ key: 'x' }, { 'content-type': 'text/plain' })).status, 415);
-    assert.equal((await post({ key: 'sk-ant-api03-xxxxxxxxxxxxxxxxxxxxxxxx' }, { 'content-type': 'application/json', origin: 'https://evil.example' })).status, 403);
-    assert.equal((await post({ key: 'not-a-key' })).status, 400);
-    const rejected = await post({ key: 'sk-ant-api03-xxxxxxxxxxxxxxxxxxxxBAD' });
-    assert.equal(rejected.status, 400);
-    assert.match(((await rejected.json()) as { error: string }).error, /rejected/);
+    // Tapping again while waiting restarts sign-in; the superseded attempt stays silent.
+    d.send({ type: 'setup.open' });
+    await d.next('setup.status');
+    d.send({ type: 'setup.open' });
+    assert.equal((await d.next('setup.status')).state, 'waiting');
+    assert.equal(starts, 3);
 
-    const ok = await post({ key: 'sk-ant-api03-abcdefghijklmnopqrstuvwxyz012345' });
-    const body = (await ok.json()) as { ok: boolean; key?: string };
-    assert.equal(body.ok, true);
-    assert.equal(body.key, undefined, 'the key is never echoed back');
-    assert.equal(s.agent().available, true);
-    assert.equal(statSync(store.file).mode & 0o777, 0o600);
-    assert.match(readFileSync(store.file, 'utf8'), /sk-ant-api03-abcdef/);
+    loggedIn = true;
+    finish({ ok: true });
     const w2 = await d.next('welcome');
-    assert.equal(w2.server.agent.available, true, 'connected device is re-enabled without reconnecting');
-
-    const del = await fetch(`http://${origin}/setup/key`, { method: 'DELETE', headers: { 'content-type': 'application/json' } });
-    assert.equal(del.status, 200);
-    assert.equal(store.read(), undefined);
-    assert.equal(s.agent().available, false);
+    assert.equal(w2.server.agent.available, true, 'connected device is enabled without reconnecting');
+    assert.equal(s.agent().source, '/login managed key');
+    assert.equal(d.inbox.filter((m) => m.type === 'setup.status').length, 0, 'no failure from the cancelled attempt');
     d.close();
   } finally {
-    if (savedEnv !== undefined) process.env.ANTHROPIC_API_KEY = savedEnv;
+    if (savedKey !== undefined) process.env.ANTHROPIC_API_KEY = savedKey;
     await s.close();
   }
 });
