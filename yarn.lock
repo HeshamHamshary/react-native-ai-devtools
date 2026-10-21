@@ -6692,6 +6692,7 @@ __metadata:
   version: 0.0.0-use.local
   resolution: "react-native-agent-devtools@workspace:packages/react-native-agent-devtools"
   dependencies:
+    "@babel/core": "npm:^7.25.2"
     "@jest/globals": "npm:^29.7.0"
     "@react-native/babel-preset": "npm:0.86.2"
     "@react-native/jest-preset": "npm:0.86.2"

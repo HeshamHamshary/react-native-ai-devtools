@@ -10,7 +10,7 @@ import type {
   TapMode,
   TargetSelector,
 } from 'react-native-agent-devtools-protocol';
-import { LIMITS, describeTarget } from 'react-native-agent-devtools-protocol';
+import { LIMITS, describeTarget, redactText } from 'react-native-agent-devtools-protocol';
 import type { LogCollector } from '../collectors/LogCollector';
 import type { NavigationTracker } from '../collectors/NavigationTracker';
 import type { NetworkCollector } from '../collectors/NetworkCollector';
@@ -437,10 +437,10 @@ export class Executor {
       if (this.d.nativeAvailable && el.tag !== undefined) {
         const r = await this.d.native.typeText(el.tag, text, replace, opts.submit === true);
         mode = 'native';
-        detail = { length: r.length, submitted: r.submitted, ...(r.secure ? { secure: true } : { value: r.value }) };
+        detail = { length: r.length, submitted: r.submitted, ...(r.secure ? { secure: true } : { value: redactText(r.value ?? '') }) };
         const expected = replace ? text : undefined;
         if (expected !== undefined && !r.secure && r.value !== expected) {
-          warnings.push(`field now contains "${truncate(r.value ?? '', 60)}" (input may be masked, formatted or length-limited)`);
+          warnings.push(`field now contains "${truncate(redactText(r.value ?? ''), 60)}" (input may be masked, formatted or length-limited)`);
         }
       } else {
         const onChangeText = el.owners.map((o) => o.memoizedProps?.onChangeText).find((f) => typeof f === 'function');
