@@ -1,7 +1,7 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { join } from 'node:path';
 import { WebSocketServer, type WebSocket } from 'ws';
-import type { ClientMessage, ServerInfo } from 'react-native-agent-devtools-protocol';
+import type { ClientMessage, HistoryEvent, ServerInfo, ServerMessage } from 'react-native-agent-devtools-protocol';
 import { MAX_MESSAGE_BYTES, encode, isRpcMethod, parseClientMessage, redactText } from 'react-native-agent-devtools-protocol';
 import { claudeCodeSignIn, type SignInBackend, type SignInHandle } from './agent/account.ts';
 import { AgentSession, verifyAgentAuth } from './agent/AgentSession.ts';
@@ -68,8 +68,42 @@ export interface RunningServer {
 }
 
 const HELLO_TIMEOUT_MS = 5_000;
+/** A JS reload or a network blip reconnects within seconds; keep the conversation this long. */
+const RESUME_WINDOW_MS = 3 * 60_000;
+const MAX_HISTORY = 400;
+
+/** What survives a reconnect of the same app install: the chat session and its transcript. */
+interface Conversation {
+  session?: ChatSession;
+  history: HistoryEvent[];
+  device?: DeviceSession;
+  model?: string;
+  expiry?: NodeJS.Timeout;
+}
+
+/** Keep the displayable chat events, with streamed deltas folded into one text event. */
+function record(conv: Conversation, m: ServerMessage, folding: WeakSet<object>): void {
+  const last = conv.history[conv.history.length - 1];
+  if (m.type === 'chat.delta') {
+    if (last?.type === 'chat.text' && last.turnId === m.turnId && folding.has(last)) {
+      last.text += m.text;
+      return;
+    }
+    const ev: HistoryEvent = { type: 'chat.text', turnId: m.turnId, text: m.text };
+    folding.add(ev);
+    conv.history.push(ev);
+  } else if (m.type === 'chat.text' || m.type === 'chat.tool' || m.type === 'chat.done' || m.type === 'chat.error' || m.type === 'chat.notice') {
+    conv.history.push(m);
+  } else return;
+  if (conv.history.length > MAX_HISTORY) conv.history.splice(0, conv.history.length - MAX_HISTORY);
+}
 
 type Availability = { available: boolean; reason?: string; source?: string; via?: 'claude-code'; mode?: AuthMode };
+/**
+ * A chat backend for one app: the built-in Agent SDK session, the developer's Claude
+ * Code (channel), or the scripted demo. Another model provider would implement the
+ * same shape, using MOBILE_TOOLS (provider-neutral zod schemas) for the app tools.
+ */
 type ChatSession = AgentSession | DemoSession | ChannelChat;
 
 function readBody(req: IncomingMessage, limit = 1_000_000): Promise<string> {
@@ -137,6 +171,17 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
   const sessions = new Map<string, ChatSession>();
   /** Model chosen in the app, per device (built-in agent only). */
   const modelFor = new Map<string, string>();
+  /** Conversations by app install id, resumable after a reconnect. */
+  const conversations = new Map<string, Conversation>();
+  const folding = new WeakSet<object>();
+  const convOf = (d: DeviceSession) => (d.instance ? conversations.get(d.instance) : undefined);
+  const setSession = (d: DeviceSession, s: ChatSession | undefined) => {
+    sessions.get(d.id)?.close();
+    sessions.delete(d.id);
+    if (s) sessions.set(d.id, s);
+    const conv = convOf(d);
+    if (conv) conv.session = s;
+  };
   const mcp = opts.mcp ? createMcpHandler(devices, SERVER_VERSION) : undefined;
   let port = opts.port;
 
@@ -186,11 +231,15 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
   /** Re-evaluate credentials and (re)start sessions on every connected device. */
   const refreshAgent = async () => {
     availability = await computeAvailability();
+    // Detached conversations keep their transcript but get a fresh session when they resume.
+    for (const conv of conversations.values()) {
+      if (conv.device) continue;
+      conv.session?.close();
+      conv.session = undefined;
+    }
     for (const d of devices.list()) {
-      sessions.get(d.id)?.close();
-      sessions.delete(d.id);
       const s = newSession(d);
-      if (s) sessions.set(d.id, s);
+      setSession(d, s);
       d.send({ type: 'welcome', sessionId: d.id, trusted: d.trusted, server: serverInfo(s, d) });
     }
     log(`agent ${availability.available ? `ready (credentials: ${availability.source})` : `unavailable: ${availability.reason}`}`);
@@ -243,7 +292,7 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
         return json(
           res,
           200,
-          devices.list().map((d) => ({ id: d.id, label: d.label, info: d.info, remote: d.remote, trusted: d.trusted, stats: d.stats })),
+          devices.list().map((d) => ({ id: d.id, label: d.label, instance: d.instance, info: d.info, remote: d.remote, trusted: d.trusted, stats: d.stats })),
         );
       }
       if (url.pathname === '/api/pairing' && req.method === 'GET') {
@@ -339,11 +388,36 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
           return;
         }
         device = new DeviceSession(ws, msg.device, msg.capabilities, remote, trusted);
-        devices.add(device);
-        const session = newSession(device);
-        if (session) sessions.set(device.id, session);
-        log(`device connected: ${device.label}${remote ? ` from ${addr}` : ''}${trusted ? ' (paired)' : ''}`);
-        device.send({ type: 'welcome', sessionId: device.id, trusted, ...(issued ? { deviceToken: issued } : {}), server: serverInfo(session, device) });
+        const d = device;
+        if (msg.instance) d.instance = msg.instance;
+        devices.add(d);
+        let conv = convOf(d);
+        let session: ChatSession | undefined;
+        if (conv) {
+          clearTimeout(conv.expiry);
+          const previous = conv.device;
+          conv.device = d;
+          // The same install connected again (reload, network change): take over its conversation.
+          if (previous && previous !== d) {
+            sessions.delete(previous.id);
+            previous.disconnect(4005, 'resumed on a new connection');
+          }
+          session = conv.session;
+          session?.attach(d);
+          if (conv.model) modelFor.set(d.id, conv.model);
+        } else if (d.instance) {
+          conv = { history: [], device: d };
+          conversations.set(d.instance, conv);
+        }
+        session ??= newSession(d);
+        if (session) sessions.set(d.id, session);
+        if (conv) conv.session = session;
+        const c = conv;
+        if (c) d.on('sent', (m: ServerMessage) => record(c, m, folding));
+        log(`device connected: ${d.label}${remote ? ` from ${addr}` : ''}${trusted ? ' (paired)' : ''}${c?.history.length ? ' (resumed conversation)' : ''}`);
+        d.send({ type: 'welcome', sessionId: d.id, trusted, ...(issued ? { deviceToken: issued } : {}), server: serverInfo(session, d) });
+        if (c?.history.length) d.send({ type: 'chat.history', events: c.history });
+        if (session?.busy) d.send({ type: 'chat.status', state: 'thinking' });
         return;
       }
 
@@ -363,6 +437,11 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
           }
           devices.focus(device.id);
           log(`chat ← ${device.label}: ${redactText(msg.text).slice(0, 120)}`);
+          const conv = convOf(device);
+          if (conv) {
+            const attachment = msg.context?.selection?.split('\n')[0]?.slice(0, 100);
+            conv.history.push({ type: 'chat.user', id: msg.id, text: msg.text, ...(attachment ? { attachment } : {}) });
+          }
           await session.send(msg.text, msg.id, msg.context);
           return;
         }
@@ -371,19 +450,20 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
           await sessions.get(device.id)?.interrupt();
           return;
         case 'chat.reset': {
-          sessions.get(device.id)?.close();
-          sessions.delete(device.id);
-          const s = newSession(device);
-          if (s) sessions.set(device.id, s);
+          const conv = convOf(device);
+          if (conv) conv.history = [];
+          setSession(device, undefined);
+          setSession(device, newSession(device));
           return;
         }
         case 'chat.config': {
           if (msg.model) modelFor.set(device.id, msg.model);
           else modelFor.delete(device.id);
-          sessions.get(device.id)?.close();
-          sessions.delete(device.id);
+          const conv = convOf(device);
+          if (conv) conv.history = [];
+          setSession(device, undefined);
           const s = newSession(device);
-          if (s) sessions.set(device.id, s);
+          setSession(device, s);
           log(`model for ${device.label}: ${msg.model ?? 'default'}`);
           device.send({ type: 'welcome', sessionId: device.id, trusted: device.trusted, server: serverInfo(s, device) });
           return;
@@ -406,11 +486,26 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
     ws.on('close', () => {
       clearTimeout(helloTimer);
       if (!device) return;
-      log(`device disconnected: ${device.label}`);
-      modelFor.delete(device.id);
-      sessions.get(device.id)?.close();
-      sessions.delete(device.id);
-      device.close();
+      const d = device;
+      log(`device disconnected: ${d.label}`);
+      const conv = convOf(d);
+      if (conv && conv.device === d) {
+        // Keep the conversation (and the model's context) for the reconnect that usually follows.
+        conv.device = undefined;
+        conv.model = modelFor.get(d.id);
+        sessions.delete(d.id);
+        const instance = d.instance!;
+        conv.expiry = setTimeout(() => {
+          conv.session?.close();
+          conversations.delete(instance);
+        }, RESUME_WINDOW_MS);
+        conv.expiry.unref();
+      } else if (!conv) {
+        sessions.get(d.id)?.close();
+        sessions.delete(d.id);
+      }
+      modelFor.delete(d.id);
+      d.close();
     });
     ws.on('error', (e) => log(`socket error: ${redactText(e.message)}`));
   };
@@ -434,6 +529,10 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
     close: async () => {
       pendingSignIn?.cancel();
       sessions.forEach((s) => s.close());
+      for (const conv of conversations.values()) {
+        clearTimeout(conv.expiry);
+        conv.session?.close();
+      }
       wss.clients.forEach((c) => c.terminate());
       await new Promise<void>((r) => http.close(() => r()));
     },

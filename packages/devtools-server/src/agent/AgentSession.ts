@@ -99,12 +99,17 @@ export class AgentSession {
   private cancelRequested = false;
   /** Resolves once the session's credentials have been checked (fail closed). */
   private ready?: Promise<{ ok: boolean; reason?: string }>;
-  private readonly device: DeviceSession;
+  private device: DeviceSession;
   private readonly cfg: AgentConfig;
 
   constructor(device: DeviceSession, cfg: AgentConfig) {
     this.device = device;
     this.cfg = cfg;
+  }
+
+  /** Continue this conversation on a reconnected app (same install). */
+  attach(device: DeviceSession): void {
+    this.device = device;
   }
 
   get busy(): boolean {

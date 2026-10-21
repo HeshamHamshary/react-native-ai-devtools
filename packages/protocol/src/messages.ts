@@ -79,6 +79,8 @@ export type ClientMessage =
       device: DeviceInfo;
       capabilities: CapabilityMap;
       auth?: { token?: string; pairingCode?: string };
+      /** Stable id of this app install, so a reload or reconnect resumes the same conversation. */
+      instance?: string;
     }
   /** `context.selection`: the element the developer picked in inspect mode, as text. */
   | { type: 'chat.send'; id: string; text: string; context?: { selection?: string } }
@@ -123,6 +125,8 @@ export type ServerMessage =
   | { type: 'chat.error'; message: string; code?: string }
   /** Informational line in the chat (does not end the turn). */
   | { type: 'chat.notice'; text: string; level: 'info' | 'warning' }
+  /** The conversation so far, replayed when an app reconnects (after a reload or network drop). */
+  | { type: 'chat.history'; events: HistoryEvent[] }
   | { type: 'rpc.call'; id: string; method: RpcMethod; params: unknown; timeoutMs?: number }
   | { type: 'rpc.cancel'; id: string }
   | { type: 'approval.request'; id: string; title: string; detail: string; risk: 'medium' | 'high' }
@@ -131,6 +135,13 @@ export type ServerMessage =
   | { type: 'pong'; ts: number };
 
 export type SetupState = 'waiting' | 'failed';
+
+/** Chat events kept by the server so a reconnecting app can rebuild its transcript. */
+export type HistoryEvent =
+  | { type: 'chat.user'; id: string; text: string; attachment?: string }
+  | Extract<ServerMessage, { type: 'chat.text' | 'chat.tool' | 'chat.done' | 'chat.error' | 'chat.notice' }>;
+
+const HISTORY_TYPES = new Set(['chat.user', 'chat.text', 'chat.tool', 'chat.done', 'chat.error', 'chat.notice']);
 
 /** Largest message accepted on either side (screenshots are the biggest payloads). */
 export const MAX_MESSAGE_BYTES = 8 * 1024 * 1024;
@@ -180,6 +191,9 @@ export function parseClientMessage(raw: unknown): Parsed<ClientMessage> {
         if (m.auth.pairingCode !== undefined && !isStr(m.auth.pairingCode, 32)) {
           return { ok: false, error: 'hello: invalid pairing code' };
         }
+      }
+      if (m.instance !== undefined && (!isStr(m.instance, 64) || !/^[A-Za-z0-9_-]+$/.test(m.instance))) {
+        return { ok: false, error: 'hello: invalid instance' };
       }
       return { ok: true, msg: m as ClientMessage };
     }
@@ -239,6 +253,9 @@ export function parseServerMessage(raw: unknown): Parsed<ServerMessage> {
       if (!isStr(m.id, 64)) return { ok: false, error: 'rpc.call: invalid id' };
       if (!isRpcMethod(m.method)) return { ok: false, error: `rpc.call: unknown method ${String(m.method)}` };
       return { ok: true, msg: m as ServerMessage };
+    case 'chat.history':
+      if (!Array.isArray(m.events) || m.events.length > 500) return { ok: false, error: 'chat.history: invalid events' };
+      return { ok: true, msg: { type: 'chat.history', events: m.events.filter((e) => isObj(e) && HISTORY_TYPES.has(String(e.type))) as HistoryEvent[] } };
     case 'chat.notice':
       if (!isStr(m.text, 2_000)) return { ok: false, error: 'chat.notice: invalid text' };
       return { ok: true, msg: { type: 'chat.notice', text: m.text, level: m.level === 'warning' ? 'warning' : 'info' } };

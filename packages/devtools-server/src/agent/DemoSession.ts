@@ -7,9 +7,14 @@ import type { DeviceSession } from '../transport/devices.ts';
  */
 export class DemoSession {
   private turn?: string;
-  private readonly device: DeviceSession;
+  private device: DeviceSession;
 
   constructor(device: DeviceSession) {
+    this.device = device;
+  }
+
+  /** Continue this conversation on a reconnected app (same install). */
+  attach(device: DeviceSession): void {
     this.device = device;
   }
 

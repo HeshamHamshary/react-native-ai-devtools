@@ -241,6 +241,12 @@ export class ChannelHub {
     if (ws && ws.readyState === ws.OPEN) ws.send(JSON.stringify(m));
   }
 
+  /** An app reconnected (same install): route its turn and late replies to the new connection. */
+  rebind(from: DeviceSession, to: DeviceSession): void {
+    if (this.turn?.device === from) this.turn.device = to;
+    for (const [id, d] of this.recent) if (d === from) this.recent.set(id, to);
+  }
+
   private remember(chatId: string, device: DeviceSession): void {
     this.recent.set(chatId, device);
     if (this.recent.size > 50) this.recent.delete(this.recent.keys().next().value!);
@@ -250,12 +256,17 @@ export class ChannelHub {
 /** The per-device chat session when the chat goes to Claude Code. */
 export class ChannelChat {
   readonly modelName = undefined;
-  private readonly device: DeviceSession;
+  private device: DeviceSession;
   private readonly hub: ChannelHub;
 
   constructor(device: DeviceSession, hub: ChannelHub) {
     this.device = device;
     this.hub = hub;
+  }
+
+  attach(device: DeviceSession): void {
+    this.hub.rebind(this.device, device);
+    this.device = device;
   }
 
   /** One Claude Code conversation serves every connected app, one message at a time. */

@@ -62,8 +62,12 @@ export class DeviceSession extends EventEmitter {
     return this.ws.readyState === this.ws.OPEN;
   }
 
+  /** Stable id of the app install (from hello), used to resume its conversation. */
+  instance?: string;
+
   send(msg: ServerMessage): void {
     if (this.open) this.ws.send(encode(msg));
+    if (msg.type.startsWith('chat.')) this.emit('sent', msg);
   }
 
   rpc<T = unknown>(method: RpcMethod, params: Record<string, unknown> = {}, timeoutMs = 30_000, signal?: AbortSignal): Promise<RpcResult<T>> {

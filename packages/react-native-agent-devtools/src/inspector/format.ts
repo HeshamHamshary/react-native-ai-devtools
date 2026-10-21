@@ -31,7 +31,8 @@ export function formatElement(el: UIElement, opts: FormatOptions = {}): string {
   if (el.expanded !== undefined) parts.push(`[${el.expanded ? 'expanded' : 'collapsed'}]`);
   if (!el.enabled) parts.push('[disabled]');
   if (el.focused) parts.push('[focused]');
-  if (el.hittable === false) parts.push(`[covered by ${el.coveredBy ?? 'another view'}]`);
+  // Our own panel is not part of the app; taps move it out of the way first.
+  if (el.hittable === false && el.coveredBy !== 'the devtools overlay') parts.push(`[covered by ${el.coveredBy ?? 'another view'}]`);
   if (el.component && el.role !== 'list') parts.push(`<${el.component}>`);
   if (opts.bounds && el.bounds) {
     const b = el.bounds;

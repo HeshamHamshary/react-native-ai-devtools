@@ -34,6 +34,12 @@ import { Store } from '../utils/Store';
 
 export const LIBRARY_VERSION = '0.1.0';
 
+function newInstanceId(): string {
+  let id = '';
+  for (let i = 0; i < 24; i++) id += 'abcdefghijklmnopqrstuvwxyz0123456789'[Math.floor(Math.random() * 36)];
+  return id;
+}
+
 /** Short title for a picked element, e.g. `Pressable "Log in" · LoginScreen.tsx:88`. */
 export function selectionTitle(d: ElementDetails): string {
   // Interactive elements by the app component that renders them; plain views by their element.
@@ -208,15 +214,20 @@ export class Runtime {
     this.logs.install();
     this.network.install();
     this.nav.attach(this.opts.navigationRef);
-    // A paired device keeps its token across reloads and restarts (Keychain / app-private prefs).
-    void native
-      .getStoredValue(this.tokenKey())
-      .catch(() => undefined)
-      .then((token) => {
+    // A paired device keeps its token across reloads and restarts (Keychain / app-private prefs),
+    // and its install id so a reload resumes the same conversation.
+    void Promise.all([native.getStoredValue(this.tokenKey()).catch(() => undefined), native.getStoredValue('instance').catch(() => undefined)]).then(
+      ([token, instance]) => {
         this.deviceToken = token;
+        this.instance = instance ?? newInstanceId();
+        if (!instance) void native.setStoredValue('instance', this.instance).catch(() => undefined);
         if (!this.stopped) this.connect();
-      });
+      },
+    );
   }
+
+  /** Stable per install; a fresh one per JS context when native storage is unavailable. */
+  private instance = newInstanceId();
 
   private stopped = false;
 
@@ -355,6 +366,7 @@ export class Runtime {
       protocol: PROTOCOL_VERSION,
       device: this.deviceInfo(),
       capabilities: capabilities(),
+      instance: this.instance,
       ...(Object.keys(auth).length ? { auth } : {}),
     };
   }
@@ -431,12 +443,26 @@ export class Runtime {
     return details;
   }
 
-  /** A snapshot taken after any native screen transition has finished (hit-tests are wrong mid-animation). */
+  /**
+   * A snapshot taken after any native screen transition has finished (hit-tests are
+   * wrong mid-animation), with our own panel out of the way: it is not part of the
+   * app, so it must never count as covering an element.
+   */
   private async settledSnapshot(): Promise<Snapshot> {
     let snap = await this.executor.snapshot();
     for (let i = 0; i < 15 && snap.transitioning; i++) {
       await new Promise<void>((r) => setTimeout(() => r(), 100));
       snap = await this.executor.snapshot();
+    }
+    if (snap.internal.elements.some((e) => e.coveredBy === 'the devtools overlay')) {
+      this.store.set({ overlayHidden: true });
+      try {
+        await this.nextFrame();
+        await this.nextFrame();
+        snap = await this.executor.snapshot();
+      } finally {
+        this.store.set({ overlayHidden: false });
+      }
     }
     return snap;
   }
@@ -591,6 +617,18 @@ export class Runtime {
         this.pairingCode = undefined;
         this.store.set({ connection: 'pairing-required', connectionDetail: m.reason, trusted: false });
         break;
+      case 'chat.history': {
+        // Rebuild the transcript the server kept while this app reloaded or reconnected.
+        this.currentAssistantId = undefined;
+        this.store.set({ messages: [] });
+        for (const e of m.events) {
+          if (e.type === 'chat.user') this.addMessage({ id: e.id, role: 'user', text: e.text, ts: Date.now(), ...(e.attachment ? { attachment: e.attachment } : {}) });
+          else this.onServerMessage(e);
+        }
+        this.flushDeltas();
+        this.currentAssistantId = undefined;
+        break;
+      }
       case 'chat.notice':
         this.flushDeltas();
         this.currentAssistantId = undefined;

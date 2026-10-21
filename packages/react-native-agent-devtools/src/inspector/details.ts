@@ -227,7 +227,7 @@ export function diagnose(d: ElementDetails, el: InternalElement | undefined, sna
     const blocksSelf = pe.on === 'this view' ? pe.value === 'none' || pe.value === 'box-none' : pe.value === 'none';
     if (blocksSelf) add('error', 'POINTER_EVENTS', `pointerEvents="${pe.value}" on ${pe.on} prevents this element from receiving touches.`);
   }
-  if (el?.hittable === false) {
+  if (el?.hittable === false && el.coveredBy !== 'the devtools overlay') {
     add('error', 'COVERED', `A real touch at its center lands on ${el.coveredBy ?? 'another view'}, not on this element.`);
   }
   if (el && (el.role === 'button' || el.role === 'link') && !el.pressHandler && !el.pressability && !el.explicit) {

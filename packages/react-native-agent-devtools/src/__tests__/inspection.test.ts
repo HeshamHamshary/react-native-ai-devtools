@@ -142,6 +142,17 @@ describe('element details', () => {
     expect(d.coveredBySource).toMatchObject({ file: '/proj/src/screens/Screen1089.tsx', line: 89 });
   });
 
+  it('never counts the devtools panel as covering the app', async () => {
+    const t = tree();
+    const panelTag = 9999;
+    const snap = await makeInspector(() => t.root, { hit: (tag) => (tag === tagOf(t.btn.view) ? panelTag : tag) }, { overlayTags: () => new Set([panelTag]) }).snapshot();
+    const el = snap.internal.elements.find((e) => e.testID === 'login-submit')!;
+    expect(el.coveredBy).toBe('the devtools overlay');
+    expect(describeElement(snap, el.fiber, el, deps).findings.map((f) => f.code)).not.toContain('COVERED');
+    const { formatElement } = await import('../inspector/format');
+    expect(formatElement(el)).not.toMatch(/covered/);
+  });
+
   it('reports disabled state and who set it, and pointerEvents that block touches', async () => {
     const t = tree({ disabled: true });
     (t.screen.child as any).memoizedProps.pointerEvents = 'none';

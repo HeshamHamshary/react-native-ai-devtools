@@ -471,3 +471,68 @@ test('MCP exposes inspect and audit backed by the device', async () => {
   assert.match(au.result?.content?.[0]?.text ?? '', /audit of Login/);
   d.close();
 });
+
+test('a reconnecting app (same install) resumes its conversation and transcript', async () => {
+  const attached: string[] = [];
+  let created = 0;
+  const s = await startServer(
+    options({
+      mcp: false,
+      agentAvailable: { available: true },
+      sessionFactory: (device) => {
+        created++;
+        let dev = device;
+        return {
+          busy: false,
+          modelName: undefined,
+          attach(d: typeof device) {
+            attached.push(d.id);
+            dev = d;
+          },
+          send: async (_text: string, turnId: string) => {
+            dev.send({ type: 'chat.delta', turnId, text: 'You are on ' });
+            dev.send({ type: 'chat.delta', turnId, text: 'Login.' });
+            dev.send({ type: 'chat.done', turnId, ok: true });
+          },
+          interrupt: async () => {},
+          close() {},
+        } as never;
+      },
+    }),
+  );
+  try {
+    const hello = (d: FakeDevice, instance: string) =>
+      d.send({ type: 'hello', protocol: 1, device: { platform: 'ios', osVersion: '26.0', libraryVersion: '0.1.0', window: { width: 1, height: 1, scale: 1 } }, capabilities: {}, instance });
+    const a = new FakeDevice(`ws://127.0.0.1:${s.port}`);
+    await a.opened();
+    hello(a, 'install-1');
+    await a.next('welcome');
+    a.send({ type: 'chat.send', id: 'm1', text: 'What screen?', context: { selection: 'e5 button "Log in"\nmore' } });
+    await a.next('chat.done');
+    a.close();
+    await new Promise((r) => setTimeout(r, 50));
+
+    const b = new FakeDevice(`ws://127.0.0.1:${s.port}`);
+    await b.opened();
+    hello(b, 'install-1');
+    await b.next('welcome');
+    const history = await b.next('chat.history');
+    assert.deepEqual(history.events.map((e) => e.type), ['chat.user', 'chat.text', 'chat.done']);
+    assert.deepEqual(history.events[0], { type: 'chat.user', id: 'm1', text: 'What screen?', attachment: 'e5 button "Log in"' });
+    assert.equal((history.events[1] as { text: string }).text, 'You are on Login.', 'streamed deltas folded into one text');
+    assert.equal(created, 1, 'the same session continued');
+    assert.equal(attached.length, 1);
+
+    const other = new FakeDevice(`ws://127.0.0.1:${s.port}`);
+    await other.opened();
+    hello(other, 'install-2');
+    await other.next('welcome');
+    await new Promise((r) => setTimeout(r, 50));
+    assert.equal(other.inbox.filter((m) => m.type === 'chat.history').length, 0, 'another install starts fresh');
+    assert.equal(created, 2);
+    b.close();
+    other.close();
+  } finally {
+    await s.close();
+  }
+});

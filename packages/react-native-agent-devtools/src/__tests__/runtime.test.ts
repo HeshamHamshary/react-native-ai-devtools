@@ -61,3 +61,24 @@ describe('chat notices', () => {
     expect(rt.store.get().chat).toBe('thinking');
   });
 });
+
+describe('resuming after a reload', () => {
+  it('rebuilds the transcript from chat.history', () => {
+    const rt = new Runtime({ serverUrl: 'ws://localhost:8765' });
+    deliver(rt, {
+      type: 'chat.history',
+      events: [
+        { type: 'chat.user', id: 'm1', text: 'Why?', attachment: 'PrimaryButton "Log in"' },
+        { type: 'chat.tool', turnId: 'm1', toolId: 't1', name: 'mobile_inspect', phase: 'start', summary: 'Inspect selected element' },
+        { type: 'chat.tool', turnId: 'm1', toolId: 't1', name: 'mobile_inspect', phase: 'end', ok: true, durationMs: 40, detail: 'e5 button' },
+        { type: 'chat.text', turnId: 'm1', text: 'It is covered by #promo-overlay.' },
+        { type: 'chat.done', turnId: 'm1', ok: true },
+      ],
+    });
+    const msgs = rt.store.get().messages;
+    expect(msgs.map((m) => m.role)).toEqual(['user', 'tool', 'assistant']);
+    expect(msgs[0]).toMatchObject({ text: 'Why?', attachment: 'PrimaryButton "Log in"' });
+    expect(msgs[1]!.tool).toMatchObject({ phase: 'end', ok: true, detail: 'e5 button' });
+    expect(rt.store.get().chat).toBe('idle');
+  });
+});
