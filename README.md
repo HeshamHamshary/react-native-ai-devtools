@@ -1,79 +1,64 @@
 # react-native-agent-devtools
 
-> Working name. The repository is `react-native-ai-devtools`, but that npm name is already taken (see [the competitive review](docs/competitive-architecture-review.md#11-execbro-igorzheludkovexecbro)).
-
-An AI assistant that lives inside your React Native **development build**. Tap the floating button, ask it to log in, open a screen, or find out why a button doesn't respond. A Claude agent running on your computer inspects the live app, operates it, and reads its errors and network traffic.
+An AI debugging assistant that lives inside your React Native **development build**. Tap the floating button and ask "why doesn't this button work?", "check this screen for bugs" or "log in and open my booking". A coding agent on your computer inspects the live React tree, operates the app, reads its errors and network traffic, and points you to the exact file and line.
 
 ```
-┌──────── your app (debug build) ────────┐          ┌──────────── your computer ─────────────┐
-│ <AgentDevTools>                         │  WS      │ react-native-agent-devtools-server     │
-│  • React-aware UI snapshot (~2–20 ms)   │◀───────▶ │  • Claude Agent SDK session per app     │
-│  • native hit-testing / input / scroll  │          │  • mobile_* tools, read-only repo tools │
-│  • on-device multi-step execution       │          │  • MCP endpoint for Claude Code         │
-│  • console / errors / network capture   │          └─────────────────────────────────────────┘
-│  • floating chat                        │
-└─────────────────────────────────────────┘
+┌──────── your app (debug build) ─────────┐          ┌──────────── your computer ──────────────┐
+│ <AgentDevTools>                         │   WS     │ react-native-agent-devtools-server      │
+│  • React-aware snapshot + inspection    │◀────────▶│  • chat: your Claude Code (channel) or  │
+│  • native hit-testing, input, scroll    │ loopback │    the built-in Claude Agent SDK agent  │
+│  • on-device multi-step execution       │ (or LAN, │  • mobile_* tools over MCP              │
+│  • logs, errors, network, alerts        │  paired) │  • OS-level input: adb / XCUITest       │
+│  • floating chat + inspect mode         │          │  • replayable test flows                │
+└─────────────────────────────────────────┘          └─────────────────────────────────────────┘
 ```
 
-It is a development and QA tool. When `__DEV__` is false it renders only your app and installs nothing, and every native method refuses to run in non-debuggable builds.
+It is a development and QA tool: release builds contain none of it (checked in CI), and the native module refuses to run in non-debuggable builds.
 
-## What it does
+## What makes it different
 
-- **Automatic UI discovery.** It reads the committed React tree, so there's no per-element registration and no `testID` requirement. It finds buttons, text fields, switches, scroll views, lists, modals and visible text. It reads Fabric layout synchronously and uses real native hit-testing to tell you when something is covered by another view.
-- **Real interactions, honestly labelled.** Every result reports the mode it used:
+Most mobile agents drive the app from outside, through screenshots or the accessibility tree. This one runs inside the app and reads React itself:
 
-  | Mode | What it means |
+- **Inspect any element.** Tap it in inspect mode, or let the agent ask. You get the **file:line where its JSX is written** (mapped through Metro), the components that rendered it, props, handlers, layout style and accessibility. You also learn whether a real finger can reach it and, if not, **which view covers it and where that view is written**. When the source can't be mapped, it says why instead of guessing.
+- **Audit a screen in milliseconds.** It flags covered or handler-less buttons, overlapping or tiny touch targets, missing accessibility labels, text outside its container or misaligned with its row, and errors and failed requests recorded on that screen.
+- **Diagnose with source.** JS errors and failed requests come with the app code that threw or started them, plus the screen they happened on.
+- **Honest interactions.** Every action reports how it was performed:
+
+  | Mode | Meaning |
   |---|---|
-  | `synthesized-touch` | Android: a MotionEvent through the real view hierarchy and RN touch pipeline |
-  | `native` | Typing via the platform text stack; native scrolling; UISwitch |
-  | `semantic` | iOS taps. There is no public in-process touch API, so these are always gated by a native hit-test |
+  | `semantic` | A JS handler was invoked (iOS in-process taps, alert callbacks). Gated by a native hit-test, never presented as a finger touch |
+  | `native` | A platform API on the view: typing, scrolling, Android dialog buttons |
+  | `synthesized-touch` | Android: a MotionEvent dispatched through the app's own view hierarchy |
+  | `os-injected` | Real OS input from outside the app: `adb` on Android, XCUITest (via Maestro) on the iOS simulator. Use `mode: "os"` or `--os-input` to require it |
 
-- **Fast autonomous flows.** `mobile_execute_sequence` runs up to 25 steps on the device in one call. Each step waits for the UI to settle using React commits, network idle and transition end, not fixed sleeps. Steps can declare `expect` conditions, so a sequence stops as soon as the UI diverges.
-- **Debugging context:**
-  - console output and uncaught JS errors, chained without replacing existing handlers
-  - fetch/XHR traffic with redaction (bodies are opt-in)
-  - the route and navigation history
-  - native alerts
-  - screenshots, with optional ref-labelled boxes
-- **Three ways to talk to it:**
-  - The in-app chat, answered by **your own Claude Code session** through a channel (Claude Code research preview), using your normal Claude Code login: `react-native-agent-devtools-server claude`.
-  - The in-app chat, answered by the built-in agent (Claude Agent SDK). One tap on "Set up Claude" signs in with your Anthropic Console account in your computer's browser.
-  - Your Claude Code terminal session, through the server's MCP endpoint.
+- **Fast.** UI snapshots take 2–5 ms on device. Multi-step flows run on the device in one call, with event-driven settling and `expect` guards.
+- **Tests from conversations.** Save what the agent just did as a replayable flow, with stable selectors, route expectations and no stored secrets. Replay it from the CLI, or export it to Maestro.
 
-## Quick start (example app)
+## Quick start (example app in this repo)
 
-Requirements: macOS, Node ≥ 22.18, Xcode 26+, and Android SDK 35/36 with JDK 17. Yarn 4 is vendored in `.yarn/releases`, so you don't need to install it.
+Requirements: macOS, Node ≥ 22.18, Xcode 26+, and Android SDK 35/36 with JDK 17. Yarn 4 is vendored.
 
 ```bash
-# 1. Install. The empty yarn.lock keeps Yarn from attaching to a parent project.
 node .yarn/releases/yarn-4.11.0.cjs install
 (cd apps/example/ios && pod install)
 
-# 2. Start the devtools server (terminal 1)
-node .yarn/releases/yarn-4.11.0.cjs server --repo apps/example
-
-# 3. Start Metro (terminal 2)
-node .yarn/releases/yarn-4.11.0.cjs example start
-
-# 4. Run the app (terminal 3)
-node .yarn/releases/yarn-4.11.0.cjs example ios       # or: example android
+node .yarn/releases/yarn-4.11.0.cjs server --repo apps/example   # terminal 1: devtools server
+node .yarn/releases/yarn-4.11.0.cjs example start                 # terminal 2: Metro
+node .yarn/releases/yarn-4.11.0.cjs example ios                   # terminal 3 (or: example android)
 ```
 
-Tap the ✦ button. To give the chat a brain, either run the command below so your own Claude Code answers, or tap **Set up Claude** and sign in with an Anthropic Console account. Then ask "What screen am I on?". The demo login is any email plus `password123`.
+Tap the floating crosshair:
 
-For UI work with no Claude at all, run the server with `--demo-agent`: a clearly labelled scripted assistant.
+- **Inspect** works right away, with no model.
+- **To chat,** connect a model (below). For UI work without any model, start the server with `--demo-agent`, a clearly labelled scripted assistant.
 
-```bash
-node .yarn/releases/yarn-4.11.0.cjs claude     # chat in the app, answered by your Claude Code
-# or terminal only:
-claude mcp add --transport http rn-agent http://127.0.0.1:8765/mcp
-# then, in Claude Code: "log into the example app and open booking details"
-```
+The demo login is any email plus `password123`. The **Debug playground** screen has deliberately broken things to investigate.
 
 ## Use it in your app
 
 ```bash
-yarn add -D react-native-agent-devtools        # needs a native rebuild (not Expo Go)
+npm install --save-dev react-native-agent-devtools react-native-agent-devtools-server
+cd ios && pod install            # then rebuild the app (Expo: development build, see below)
 npx react-native-agent-devtools-server --repo .
 ```
 
@@ -82,36 +67,56 @@ import { AgentDevTools } from 'react-native-agent-devtools';
 
 export default function Root() {
   return (
-    <AgentDevTools navigationRef={navigationRef /* optional */}>
+    <AgentDevTools navigationRef={navigationRef /* optional, React Navigation */}>
       <App />
     </AgentDevTools>
   );
 }
 ```
 
-That's the whole integration. Details: [setup guide](docs/setup.md). The packages aren't published yet; until then, use the monorepo.
+That's the whole integration: there's no per-element registration and no testIDs required.
+
+- **Expo:** add `"react-native-agent-devtools"` to `plugins` in your app config and use a development build (`npx expo run:ios`). Expo Go cannot load the native module.
+- **More detail:** see the [installation guide](docs/setup.md).
+
+The packages are not published to npm yet; until then, use this monorepo.
+
+## Connect a model
+
+| Option | Uses | Command |
+|---|---|---|
+| **Your own Claude Code answers the in-app chat** | your existing Claude Code login (no API key) | `npx react-native-agent-devtools-server claude` |
+| **Built-in agent** (Claude Agent SDK) | an Anthropic Console sign-in from the app ("Set up Claude"), or `--auth api-key` / `bedrock` / `vertex` / `foundry` | `npx react-native-agent-devtools-server --auth …` |
+| **Claude Code in the terminal** drives the app | your Claude Code | `claude mcp add rn-agent -- npx react-native-agent-devtools-server mcp` |
+
+Credentials are never picked up implicitly and never reach the app. A personal claude.ai subscription is never used by the built-in agent. See [security](docs/security.md).
+
+The channel option uses Claude Code *channels*, a research preview. It needs Claude Code ≥ 2.1.234, and on company accounts an admin must enable channels.
 
 ## Documentation
 
-- [Setup: simulators, emulators, physical devices, credentials](docs/setup.md)
-- [Architecture](docs/architecture.md)
-- [Platform capability matrix](docs/capability-matrix.md)
-- [Security and privacy](docs/security.md)
-- [Status, verified results, performance and roadmap](docs/STATUS.md)
-- [Competitive architecture review](docs/competitive-architecture-review.md)
-- [Contributing](CONTRIBUTING.md)
+- [Installation and setup](docs/setup.md): bare RN, Expo, simulators, physical devices, pairing, model options
+- [Tools and API reference](docs/api.md): component props, agent tools, CLI, HTTP API, flow format
+- [Claude Code / MCP integration](docs/mcp.md)
+- [Troubleshooting](docs/troubleshooting.md)
+- [Architecture](docs/architecture.md) and [platform capability matrix](docs/capability-matrix.md)
+- [Security and privacy](docs/security.md) · [Security policy](SECURITY.md)
+- [Status, verified results, benchmarks and limitations](docs/STATUS.md)
+- [Contributing](CONTRIBUTING.md) · [Changelog](CHANGELOG.md)
 
 ## Packages
 
 | Package | What it is |
 |---|---|
-| [`packages/react-native-agent-devtools`](packages/react-native-agent-devtools) | RN library: provider, inspector, executor, collectors, chat UI, TurboModule (Swift/ObjC++, Kotlin) |
-| [`packages/devtools-server`](packages/devtools-server) | Node server: device bridge, Claude Agent SDK session, MCP endpoint, CLI |
-| [`packages/protocol`](packages/protocol) | Shared wire protocol, action schema, redaction rules |
+| [`react-native-agent-devtools`](packages/react-native-agent-devtools) | The in-app library: provider, inspector, executor, collectors, chat and inspect UI, TurboModule (Swift/ObjC++, Kotlin), Expo config plugin |
+| [`react-native-agent-devtools-server`](packages/devtools-server) | The local server: device bridge, chat backends, OS-level input, flows, MCP, CLI |
+| [`react-native-agent-devtools-protocol`](packages/protocol) | Shared wire protocol, action and flow schemas, redaction rules |
 | [`apps/example`](apps/example) | "SkyTrips" example app with an intentionally broken debug playground |
 
-## License and branding
+## License
 
-MIT. The `LICENSE` file is a placeholder until the project owner picks a license.
+MIT. See [LICENSE](LICENSE).
 
-Not affiliated with or endorsed by Anthropic. The launcher currently shows a Claude-style mark at the project owner's request during internal development ([`ClaudeMark.tsx`](packages/react-native-agent-devtools/src/ui/ClaudeMark.tsx)). Replace it, or get permission, before any public release. Apps can already override it with the `launcherIcon` prop.
+All bundled and transitive dependencies are permissively licensed (MIT, ISC, BSD), with one exception. The server depends on Anthropic's Claude Agent SDK (`@anthropic-ai/claude-agent-sdk` and its platform binaries), which npm installs under [Anthropic's terms](https://code.claude.com/docs/en/legal-and-compliance), not an open-source license. This project does not include or redistribute it.
+
+Not affiliated with or endorsed by Anthropic. "Claude" and "Claude Code" are Anthropic trademarks, used here to name the services the tool connects to.

@@ -10,9 +10,11 @@
 ## 1. Add the library
 
 ```bash
-yarn add -D react-native-agent-devtools
+yarn add -D react-native-agent-devtools react-native-agent-devtools-server
 cd ios && pod install
 ```
+
+The packages are not on npm yet. Until they are, build them from this monorepo (`yarn build`) and install them from the packed tarballs or as a workspace link.
 
 Wrap your root component:
 
@@ -34,6 +36,27 @@ Notes:
 - **Navigation.** Routes are inferred automatically from React Navigation's `route` props. Passing `navigationRef` adds exact, event-driven history. Apps without React Navigation can call `reportRoute('Checkout')`.
 - **Hard cases.** For components discovery can't see (canvas drawings, custom gesture recognizers), wrap them in `<AgentTarget id label onActivate>`.
 
+### Expo
+
+Use a development build; Expo Go can't load the native module. Add the config plugin to your app config:
+
+```json
+{
+  "expo": {
+    "plugins": ["react-native-agent-devtools"]
+  }
+}
+```
+
+Then build the app with `npx expo run:ios` or `npx expo run:android` (or EAS with a development profile).
+
+- **Autolinking:** the native module is autolinked like any React Native library.
+- **What the plugin adds:** iOS's Local Network usage description, needed to reach the server from a physical iPhone over Wi-Fi. It's added only if the app doesn't define one.
+- **Options:** `["react-native-agent-devtools", { "localNetworkUsageDescription": "…" }]`, or `{ "localNetwork": false }` to skip it.
+- **Warning:** the plugin warns at prebuild if `expo-dev-client` is missing.
+
+The plugin is covered by unit tests against `@expo/config-plugins`, but has not been tried in a real Expo project yet. See [STATUS.md](STATUS.md).
+
 ## 2. Run the server
 
 ```bash
@@ -49,6 +72,7 @@ npx react-native-agent-devtools-server --repo .        # read-only source access
 | `--model <id>` | Model for the in-app agent. |
 | `--lan` | Accept physical devices on your network (pairing required). |
 | `--require-pairing` | Require pairing for every device, simulators included (shared machines). |
+| `--os-input` | Perform taps, typing and swipes with OS-level input (see section 4); fail instead of falling back. |
 | `--demo-agent` | Scripted, clearly labelled replies. Use this for UI work without credentials. |
 | `--no-agent`, `--no-mcp` | Disable the in-app agent, or the MCP endpoint. |
 
@@ -60,6 +84,8 @@ npx react-native-agent-devtools-server pair          # current pairing code and 
 npx react-native-agent-devtools-server unpair        # revoke every paired device
 npx react-native-agent-devtools-server call getUI '{"bounds":true}' --device ios
 npx react-native-agent-devtools-server call runSequence '{"actions":[{"type":"tap","target":"text=Log in"}]}'
+npx react-native-agent-devtools-server tool mobile_audit_screen       # any agent tool, run directly
+npx react-native-agent-devtools-server tool mobile_inspect '{"target":"#login-submit"}'
 npx react-native-agent-devtools-server bench --iterations 20 --device android
 ```
 
@@ -132,11 +158,44 @@ The server prints a pairing code. In the app, tap **⚿ Pair this app** in the p
 
 Control endpoints (`/mcp`, `/api/*`, `/channel`) stay **loopback-only and token-authenticated** even in LAN mode, so another machine can't drive your app or read its data through the server. Traffic is plain `ws://`: only use LAN mode on networks you trust.
 
+## 4. OS-level input (optional)
+
+In-app interactions need nothing extra. OS-level input sends real touches and keystrokes from outside the app. Use it when the question is "does a real finger work here?", or for system UI: native alerts on iOS, the keyboard and LogBox.
+
+| Platform | Backend | Requirement |
+|---|---|---|
+| Android emulator or USB device | `adb shell input` | `adb` on `PATH` or in `$ANDROID_HOME/platform-tools`. The device is found by matching the app's process id, so several devices can be attached. |
+| iOS simulator | XCUITest, through [Maestro](https://maestro.dev)'s local `maestro mcp` | The Maestro CLI installed (`maestro --version`). The first action takes about 10 s while its driver starts, then about 1 s per action. Only local commands are used; nothing is sent to Maestro's cloud. |
+| Physical iPhone | none yet | OS-level actions return `UNSUPPORTED`. |
+
+Ask for it per action: tell the agent "tap it for real", or pass `mode: "os"` to `mobile_tap`, `mobile_type` or `mobile_swipe`. Start the server with `--os-input` to make it the default. Results then report `mode: "os-injected"`.
+
+Maestro is a third-party tool (Apache-2.0). Before installing it on a company machine, confirm with your IT/Infra team that it is approved.
+
+## 5. Test flows
+
+After the agent has done something useful, such as logging in and opening a booking, ask it to "save that as a test":
+
+- **Saving:** it saves the actions that succeeded as a flow. Each step uses a testID, or a role plus exact label, and navigation is checked by route. Text typed into secure fields becomes a `${RNAD_SECRET_…}` placeholder.
+- **Storage:** flows live in `~/.config/react-native-agent-devtools/flows/<app>/`, outside your repo.
+
+```bash
+npx react-native-agent-devtools-server flows list
+npx react-native-agent-devtools-server flows show login
+RNAD_SECRET_LOGIN_PASSWORD=… npx react-native-agent-devtools-server flows run login --device ios
+npx react-native-agent-devtools-server flows export login --maestro --out login.yaml
+```
+
+- **Replay:** `flows run` exits non-zero on failure and saves a screenshot of the failing screen.
+- **Maestro export:** best-effort. React routes and roles have no Maestro equivalent, so they become comments. See the [flow format](api.md#flow-format).
+
 ## Running the example app
 
 See the [root README](../README.md#quick-start-example-app). The example's fake backend is Metro middleware ([`apps/example/mockApi.js`](../apps/example/mockApi.js)), so there's nothing else to start.
 
 ## Troubleshooting
+
+More in [troubleshooting.md](troubleshooting.md).
 
 - **"Native module RNAgentDevTools is not linked".** Rebuild the app after installing the package (`pod install`, then a full Xcode/Gradle build).
 - **Yarn says the project is part of another project.** A `package.json` or `yarn.lock` in a parent directory confuses Yarn. This repo includes an empty `yarn.lock` for that reason; do the same in your app if needed.

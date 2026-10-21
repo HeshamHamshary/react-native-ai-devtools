@@ -3,20 +3,21 @@
 ```
 App (debug build)                                         Developer machine
 ┌──────────────────────────────────────────────┐          ┌──────────────────────────────────────────────┐
-│ <AgentDevTools>                               │          │ react-native-agent-devtools-server           │
+│ <AgentDevTools>   (release builds: a stub)    │          │ react-native-agent-devtools-server           │
 │  Profiler(onRender) ─▶ CommitTracker          │          │                                              │
-│  Anchor ─▶ your app            Overlay (chat) │          │  HTTP/WS :8765 (loopback; --lan opt-in)      │
-│                                               │   JSON   │   ├─ Host/Origin checks, pairing tokens      │
-│  Runtime                                      │◀────────▶│   ├─ DeviceRegistry → DeviceSession.rpc()    │
-│   ├─ Inspector  (fiber walk → snapshot)       │    WS    │   ├─ AgentSession (Claude Agent SDK)         │
-│   ├─ Executor   (actions, settle, guards)     │          │   │    mobile_* tools (in-process MCP)       │
-│   ├─ LogCollector / NetworkCollector / Nav    │          │   │    Read/Grep/Glob (PreToolUse allowlist) │
-│   ├─ Connection (reconnect, hello, rpc)       │          │   ├─ /mcp  (Claude Code, stateless HTTP)     │
-│   └─ native (TurboModule)                     │          │   ├─ sign-in (claude auth login --console)   │
-│                                               │          │   ├─ /channel ◀─ bridge ◀─ your claude       │
-│        iOS: Swift (UIKit) + ObjC++ shim       │          │   └─ /api/rpc, /api/devices (CLI/bench)      │
-│        Android: Kotlin                        │          └──────────────────────────────────────────────┘
-└──────────────────────────────────────────────┘
+│  Anchor ─▶ your app     Overlay (chat/inspect)│          │  HTTP/WS :8765 (loopback; --lan opt-in)      │
+│                                               │   JSON   │   ├─ Host/Origin checks, bearer token,       │
+│  Runtime                                      │◀────────▶│   │   hashed pairing tokens, device trust     │
+│   ├─ Inspector  (fiber walk → snapshot)       │    WS    │   ├─ DeviceRegistry → DeviceSession.rpc()    │
+│   ├─ details/audit/source (Metro symbolicate) │          │   ├─ chat backends: AgentSession (Agent SDK, │
+│   ├─ Executor   (actions, settle, guards,     │          │   │   explicit --auth), ChannelHub (your     │
+│   │             external OS-action handoff)   │          │   │   Claude Code), DemoSession              │
+│   ├─ Log/Network/Nav/Alert collectors         │          │   ├─ TOOLS: mobile_* + flows (one registry)  │
+│   ├─ Connection (reconnect, hello, rpc)       │          │   ├─ Automation: adb / Maestro (XCUITest)    │
+│   └─ native (TurboModule)                     │          │   ├─ FlowRecorder / FlowStore / runner       │
+│        iOS: Swift (UIKit) + ObjC++ shim       │          │   ├─ conversations (resume after reloads)    │
+│        Android: Kotlin                        │          │   └─ /mcp, /channel, /api/{rpc,tool,...}     │
+└──────────────────────────────────────────────┘          └──────────────────────────────────────────────┘
 ```
 
 ## Packages
@@ -90,9 +91,12 @@ App (debug build)                                         Developer machine
   - Partial messages stream to the device as `chat.delta`. Tool calls become `chat.tool` start/end rows; control tools flip the UI into the "agent is controlling the app" state.
   - `chat.done` carries timing: total, first token, tool, device and model time, plus the cost estimate.
 - **Credentials:**
-  - Sources: the Anthropic Console sign-in started by "Set up Claude" (Claude Code's `auth login --console`, run by the server), `ANTHROPIC_API_KEY`, or Bedrock/Vertex/Foundry.
-  - Every Claude Code process the server starts uses a dedicated `CLAUDE_CONFIG_DIR` (`~/.config/react-native-agent-devtools/claude`). Before the first prompt, `accountInfo()` must report an API-key or cloud source and no subscription; otherwise the session fails closed.
+  - The source is chosen explicitly: `--auth console|api-key|bedrock|vertex|foundry`, or a Console sign-in completed with "Set up Claude" (Claude Code's `auth login --console`, run by the server).
+  - Every Claude Code process the server starts gets a dedicated `CLAUDE_CONFIG_DIR` (`~/.config/react-native-agent-devtools/claude`). Its environment has every `ANTHROPIC_*`/`CLAUDE*` variable stripped and only the chosen mode's variables restored. API keys go through an `apiKeyHelper` flag setting.
+  - Before the first prompt, `accountInfo()` must report exactly the chosen source and no subscription, or the session fails closed. Details: [security.md](security.md).
   - Sign-in progress reaches the device as `setup.status` (`waiting` / `failed`); success arrives as a fresh `welcome` with the agent available.
+- **Conversations survive reloads.** The app sends a stable install id. The server keeps the session and a compact transcript for 3 minutes after a disconnect, re-attaches the session to the new connection and replays `chat.history`.
+- **Provider-neutral tools.** Tools are zod-defined in `TOOLS` (`src/tools/registry.ts`) and run with a `ToolContext` (device, OS input, flows). A non-Anthropic backend would implement the same chat-session shape (`send`, `interrupt`, `close`, `attach`, `busy`) and register those tools with its own tool-calling API.
 - **Claude Code, chat in the app (channels):**
   - `react-native-agent-devtools-server claude` registers a stdio MCP server (`… channel`) with Claude Code and starts `claude --dangerously-load-development-channels server:rn-agent`.
   - That bridge declares `claude/channel` and `claude/channel/permission`. It connects to the devtools server over a loopback WebSocket (`/channel`) and serves:
@@ -105,16 +109,50 @@ App (debug build)                                         Developer machine
 - **Claude Code in the terminal:** `/mcp` exposes the same tool definitions over stateless Streamable HTTP and acts on the device you last chatted from, else the most recently connected one.
 - **Repository access:** the built-in tools are limited to `Read`/`Grep`/`Glob` (plus `Edit`/`Write` with `--allow-edits`). A PreToolUse hook enforces the root allowlist and the secret-file denylist, and resolves symlinks. Bash and web tools are disallowed.
 
+## Inspection, audit and source mapping
+
+- **Element details** (`inspector/details.ts`): owners via `_debugOwner` (who rendered whom), nesting path, the props of the component the app wrote, event handlers, layout style, accessibility, `pointerEvents` on the view and its ancestors, disabled state and who set it, hit-test result. Findings are computed statically.
+- **Source** (`inspector/source.ts`):
+  - React 19 records each element's creation stack (`_debugStack`) in development.
+  - The first frame after React's JSX factory is the line where the JSX is written. React's own `formatOwnerStack` drops the same frame.
+  - Walking the owner chain gives the first site in the app's own code, which is mapped through Metro's `/symbolicate` (the endpoint LogBox uses) in one request. Results are cached.
+  - Nothing is reported unless Metro mapped it. React's per-second stack budget (`UnknownOwner`), a missing dev server and library-only sites become a `sourceNote`.
+- **Picking** uses the platform hit-test at a window point (from the topmost modal's root when a modal is open) with the inspect layer made touch-transparent for that frame.
+- **Audit** (`inspector/audit.ts`): per-element findings plus overlap, duplicate labels, text overflow, row alignment (outside the container, vertical offset in a row, column drift between rows that share a layout), and errors and failed requests recorded on the screen. Inspect and audit wait for native transitions and hide the devtools panel for one frame, so it never counts as covering the app.
+- **Errors and requests:** error stacks and request initiator stacks (captured synchronously when XHR `send` runs) are symbolicated the same way and reported as app frames.
+
+## OS-level input
+
+`src/automation/osInput.ts` picks a backend per device:
+
+- **Android:** `adb shell input`. The adb device is the one whose `pidof <package>` equals the app's reported pid; it is never guessed.
+- **iOS simulator:** a long-lived `maestro mcp` process, whose XCUITest driver stays warm, addressed by the app's `SIMULATOR_UDID`. Only local devices are used; Maestro's cloud tools are never called.
+
+An OS action:
+
+1. `prepareExternal` on the device resolves and checks the target like an in-app tap (visible, not covered, sensitive and duplicate guards), scrolls it into view, hides the overlay and records a baseline.
+2. The server converts the point with the root view's screen frame (`getRootFrame`: px on Android, pt on iOS) and injects the input.
+3. `finishExternal` settles and reports changes with mode `os-injected`.
+
+If no backend exists, the tool returns `UNSUPPORTED` and does nothing else.
+
+## Flows
+
+- **Recording:** `FlowRecorder` keeps the successful actions per app install. Targets come from each action's own result (testID, else role + exact label), so per-session refs never enter a flow. Navigation becomes `expect: { route }`, and secure-field text becomes `${RNAD_SECRET_*}`.
+- **Storage:** `FlowStore` writes JSON to the state directory, never the repo.
+- **Replay:** `runFlow` sends consecutive in-app steps as one `runSequence` RPC and OS steps through the automation layer. It stops at the first failure and saves a screenshot.
+- **Export:** `toMaestro` exports Maestro YAML.
+
 ## Protocol (JSON over one WebSocket)
 
 | Direction | Messages |
 |---|---|
-| device → server | `hello` (device info, capabilities, token or pairing code), `chat.send`, `chat.cancel`, `chat.reset`, `rpc.result`, `approval.response`, `setup.open`, `ping` |
-| server → device | `welcome`, `auth.required`, `chat.status`, `chat.delta`, `chat.text`, `chat.tool`, `chat.done`, `chat.error`, `rpc.call`, `rpc.cancel`, `approval.request`, `setup.status`, `pong` |
+| device → server | `hello` (device info incl. simulator UDID and pid, capabilities, install id, token or pairing code), `chat.send` (with the picked element as `context.selection`), `chat.cancel`, `chat.reset`, `chat.config` (model), `rpc.result`, `approval.response`, `setup.open`, `ping` |
+| server → device | `welcome` (incl. `trusted`), `auth.required`, `chat.status`, `chat.delta`, `chat.text`, `chat.tool` (incl. output preview), `chat.done`, `chat.error`, `chat.notice`, `chat.history`, `rpc.call`, `rpc.cancel`, `approval.request`, `setup.status`, `pong` |
 
 Between the server and the Claude Code channel bridge (loopback `/channel`): `hello`/`welcome`, `tool.call`/`tool.result`, `reply`/`reply.result`, `message`, `stop`, `permission.request`/`permission.verdict`.
 
-Device RPCs: `getScreen`, `getUI`, `resolve`, `tap`, `longPress`, `typeText`, `clearText`, `scroll`, `scrollTo`, `swipe`, `waitFor`, `back`, `runSequence`, `screenshot`, `getLogs`, `getNetwork`, `getNavigation`, `getPerf`, `getCapabilities`.
+Device RPCs: `getScreen`, `getUI`, `resolve`, `tap`, `longPress`, `typeText`, `clearText`, `scroll`, `scrollTo`, `swipe`, `waitFor`, `back`, `runSequence`, `screenshot`, `getLogs`, `getNetwork`, `getNavigation`, `getPerf`, `getCapabilities`, `inspect`, `audit`, `getSelection`, `prepareExternal`, `finishExternal`, `dismissKeyboard`, `dismissLogBox`, `pressAlertButton`.
 
 Both sides validate every message: only known types and methods, size limits, and field stripping.
 
@@ -125,4 +163,4 @@ See [competitive-architecture-review.md](competitive-architecture-review.md). In
 - **CDP via Metro** takes the single debugger slot (RN DevTools can't run alongside), must inject ES5 strings into Hermes, and needs async measurement sleeps.
 - **OS automation** (XCUITest/UiAutomator) is blind to React semantics. On iOS it costs about 0.8 s per tap through an XCTest runner.
 
-The in-app runtime is faster and React-aware. Its price is a native module and, on iOS, no OS-level touches. An optional OS-level backend is on the roadmap.
+The in-app runtime is faster and React-aware. Its price is a native module, and on iOS in-process taps are semantic. OS-level input is an optional layer on top (adb, XCUITest through Maestro) for when real touches matter. It reuses the in-app checks and change reports, so it is never the only source of truth.
