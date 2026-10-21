@@ -167,3 +167,14 @@ describe('matchTarget', () => {
     expect(!gone.ok && gone.error.code).toBe('STALE');
   });
 });
+
+describe('AgentTarget', () => {
+  it('exposes explicitly instrumented components', async () => {
+    const onActivate = () => {};
+    const Target = Object.assign(() => null, { __rnadTarget: true });
+    const fiber = { ...comp('AgentTarget', { id: 'chart', label: 'Revenue chart', role: 'button', onActivate }, [host('RCTView', { testID: 'chart' }, [], r(0, 0, 300, 200))]) };
+    fiber.type = Target;
+    const snap = await makeInspector(() => root([fiber])).snapshot();
+    expect(snap.elements[0]).toMatchObject({ role: 'button', label: 'Revenue chart', testID: 'chart', explicit: true, actions: ['tap'] });
+  });
+});

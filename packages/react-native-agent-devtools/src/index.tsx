@@ -3,6 +3,7 @@ export { AgentDevTools, reportRoute, type AgentDevToolsProps } from './AgentDevT
 export { AgentDevTools as ReactNativeAIDevTools } from './AgentDevTools';
 export type { NavigationRefLike } from './collectors/NavigationTracker';
 export type { NetworkOptions } from './collectors/NetworkCollector';
+export { AgentTarget, type AgentTargetProps } from './AgentTarget';
 export { ClaudeMark } from './ui/ClaudeMark';
 export type {
   ActionResult,

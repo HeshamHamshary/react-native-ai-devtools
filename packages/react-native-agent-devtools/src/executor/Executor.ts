@@ -335,7 +335,16 @@ export class Executor {
             : 'Native module not linked; cannot synthesize touches.',
         );
       }
-      if (this.d.platform === 'android' && this.d.nativeAvailable && mode !== 'semantic' && el.tag !== undefined) {
+      if (el.explicit) {
+        if (typeof el.pressHandler !== 'function') throw new ToolFailure('UNSUPPORTED', `${el.ref} is an AgentTarget without onActivate.`);
+        const handler = el.pressHandler;
+        try {
+          await handler();
+        } catch (e) {
+          throw new ToolFailure('THREW', `onActivate threw: ${e instanceof Error ? e.message : String(e)}`, { target: this.targetInfo(el), mode: 'semantic' });
+        }
+        performed = { mode: 'semantic', detail: { via: 'AgentTarget.onActivate' } };
+      } else if (this.d.platform === 'android' && this.d.nativeAvailable && mode !== 'semantic' && el.tag !== undefined) {
         const r = long ? await this.d.native.longPress(el.tag, off.dx, off.dy, 700) : await this.d.native.tap(el.tag, off.dx, off.dy);
         performed = { mode: 'synthesized-touch', detail: { handled: r.handled } };
       } else if (this.d.platform === 'ios' && this.d.nativeAvailable && el.role === 'switch' && el.tag !== undefined && mode !== 'semantic') {

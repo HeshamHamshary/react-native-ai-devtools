@@ -19,6 +19,8 @@ export interface InternalElement extends UIElement {
   hitOffset?: { dx: number; dy: number };
   textParts: string[];
   route?: RouteInfo;
+  /** Declared with <AgentTarget>; activation goes through its onActivate callback. */
+  explicit?: boolean;
 }
 
 export interface InternalText {
@@ -463,11 +465,28 @@ export class Inspector {
         return;
       }
 
+      // ---- Explicit targets (<AgentTarget>) ------------------------------------------------------
+      const explicit = owners.find((o) => (o.type as { __rnadTarget?: boolean } | null)?.__rnadTarget);
+      if (explicit) {
+        const ep = explicit.memoizedProps ?? {};
+        const el = addElement(f, next, hash, ROLE_MAP[String(ep.role ?? 'button')] ?? 'button', this.deps.measure(f), {
+          label: String(ep.label ?? ''),
+          explicit: true,
+          pressHandler: typeof ep.onActivate === 'function' ? ep.onActivate : undefined,
+          enabled: !state.disabled,
+          actions: typeof ep.onActivate === 'function' ? ['tap'] : [],
+        });
+        if (el) next.interactive = el;
+        visitChildren(f, next, depth);
+        return;
+      }
+
       // ---- Pressables -----------------------------------------------------------------------
+      const gestureHandlerButton = /GestureHandlerButton$/.test(type);
       const pressability = typeof props.onResponderRelease === 'function' && typeof props.onResponderGrant === 'function';
       const onPress = (typeof props.onPress === 'function' ? props.onPress : ownerProp(owners, 'onPress')) as any;
       const onClick = typeof props.onClick === 'function' ? props.onClick : undefined;
-      const isPressable = pressability || typeof onPress === 'function' || (onClick && a11yRole === 'button');
+      const isPressable = pressability || gestureHandlerButton || typeof onPress === 'function' || (onClick && a11yRole === 'button');
       if (isPressable) {
         const duplicate = ctx.interactive && ctx.interactive.pressHandler !== undefined && ctx.interactive.pressHandler === onPress;
         if (!duplicate) {
